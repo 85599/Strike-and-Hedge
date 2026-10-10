@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+yfinance
+pandas
+requests
+curl_cffi
+tzdata
+httpx
+pytest
