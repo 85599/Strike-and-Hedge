@@ -187,36 +187,68 @@ def _buy_option_setup(chain, metrics, scored, row, opt, bias, tech, lot, expiry,
     }
 
 
+def _spread_stop(credit, width, d_spot, short_leg, hedge_leg):
+    """What the spread costs to buy back once spot has travelled to the short strike.
+
+    Priced off the vertical's own delta and gamma, so the stop widens for a near-money short and
+    tightens for a far-out one. None when either leg carries no delta, since there is then no
+    honest way to convert an underlying move into a premium move.
+    """
+    ds, dh = abs(_n(short_leg.get("delta")) or 0.0), abs(_n(hedge_leg.get("delta")) or 0.0)
+    nd = ds - dh
+    if nd <= 0:
+        return None
+    gs, gh = abs(_n(short_leg.get("gamma")) or 0.0), abs(_n(hedge_leg.get("gamma")) or 0.0)
+    risk = nd * d_spot + 0.5 * max(gs - gh, 0.0) * d_spot * d_spot
+    return min(credit + risk, width)
+
+
 def _credit_spread(chain, row, opt, steps, lot, expiry, und, scored):
     """Defined-risk credit spread: sell `row`, buy the strike `steps` further out. No naked shorts."""
     step = _step(chain)
     k = _n(row.get("strike"))
-    if not step or k is None:
+    spot = _n(chain.get("spot"))
+    if not step or k is None or not spot:
         return None
     hk = k + steps * step if opt == "CE" else k - steps * step
     hrow = _row_at(chain, hk)
     if not hrow:
         return None
     key = "ce" if opt == "CE" else "pe"
-    sell, buy = _n((row.get(key) or {}).get("ltp")), _n((hrow.get(key) or {}).get("ltp"))
+    short_leg, hedge_leg = row.get(key) or {}, hrow.get(key) or {}
+    sell, buy = _n(short_leg.get("ltp")), _n(hedge_leg.get("ltp"))
     if not sell or buy is None:
         return None
     credit = round(sell - buy, 2)
     width = abs(hk - k)
-    if credit <= 0 or credit >= width:
+    # Both ends of the credit range are degenerate. Above half the width the short leg is at or
+    # inside the money, where the spread already trades near its expiry value and "buy it back at
+    # half the credit" cannot happen. Below 2% of the width it is dust: the max profit is a rounding
+    # error against the margin the short leg locks up, and half of it does not survive paisa
+    # rounding, which would print a target sitting on top of the entry.
+    if credit > width * 0.5 or credit < max(width * 0.02, 0.1):
         return None
-    stop, target = round(credit * 1.6, 2), round(credit * 0.4, 2)
+    d_spot = abs(k - spot)
+    stop = _spread_stop(credit, width, d_spot, short_leg, hedge_leg)
+    # A stop this tight next to the credit is model noise, not a level anyone would be stopped at.
+    if stop is None or stop - credit < credit * 0.2:
+        return None
+    max_loss = width - credit
+    target = round(credit * 0.5, 2)
+    stop = round(stop, 2)
     return {
         "kind": f"SELL_{opt}_SPREAD", "instrument": f"{und} {int(k)}/{int(hk)} {opt} credit spread {expiry}",
         "expiry": expiry, "strike": k, "option_type": opt, "side": "SELL", "entry": credit, "stop": stop, "target": target,
+        "width": width,
         "legs": [{"action": "SELL", "instrument": f"{und} {int(k)} {opt}", "ltp": sell},
                  {"action": "BUY", "instrument": f"{und} {int(hk)} {opt} (hedge)", "ltp": buy}],
-        "exit": (f"Net credit \u20b9{credit:.2f}. Buy the spread back at \u20b9{target:.2f} (keep ~60%) or if it costs "
-                 f"\u20b9{stop:.2f}. Close before expiry-day gamma and any event. The hedge leg caps loss at "
-                 f"\u20b9{(width - credit) * lot:,.0f} per lot."),
+        "exit": (f"Net credit \u20b9{credit:.2f} on a \u20b9{width:.0f} wide spread. Buy it back at \u20b9{target:.2f} "
+                 f"to keep half the credit, or at \u20b9{stop:.2f} - about a spot touch of {k:.0f}, where the short "
+                 f"leg is put to the test. Close before expiry-day gamma and any event. "
+                 f"The hedge leg caps the loss at \u20b9{max_loss * lot:,.0f} per lot even if the stop is skipped."),
         "rr": _rr(credit, stop, target, "SELL"), "lot_size": lot, "premium_risk_rs": round((stop - credit) * lot, 2),
-        "max_loss_rs": round((width - credit) * lot, 2), "max_profit_rs": round(credit * lot, 2),
-        "iv": _n((row.get(key) or {}).get("iv")), "delta": _n((row.get(key) or {}).get("delta")),
+        "max_loss_rs": round(max_loss * lot, 2), "max_profit_rs": round(credit * lot, 2),
+        "iv": _n(short_leg.get("iv")), "delta": _n(short_leg.get("delta")),
         "rationale": "; ".join(scored["reasons"][:4]),
     }
 
@@ -281,7 +313,10 @@ def build_setups(chain: dict, metrics: dict, scored: dict, fut: dict | None = No
             if s:
                 setups.append(s)
     elif bias == "RANGE":
-        # Defined-risk premium selling just outside the OI walls (iron-condor style, two independent spreads).
+        # Defined-risk premium selling just outside the OI walls (iron-condor style, two independent
+        # spreads). Each side walks outward past strikes whose spread is degenerate — deep in the
+        # money, unquoted, or with a stop tight enough to be noise — but stops early rather than
+        # selling so far out that the credit is not worth the margin.
         rows = sorted(chain.get("rows") or [], key=lambda r: _n(r.get("strike")) or 0)
         call_wall, put_wall = _n(metrics.get("call_wall")), _n(metrics.get("put_wall"))
         up_floor, dn_ceiling = spot * 1.008, spot * 0.992
@@ -289,13 +324,14 @@ def build_setups(chain: dict, metrics: dict, scored: dict, fut: dict | None = No
             up_floor = call_wall
         if put_wall and put_wall <= dn_ceiling:
             dn_ceiling = put_wall
-        ce_row = next((r for r in rows if (_n(r.get("strike")) or 0) >= up_floor), None)
-        pe_row = next((r for r in reversed(rows) if (_n(r.get("strike")) or 0) <= dn_ceiling), None)
-        for row, opt in ((ce_row, "CE"), (pe_row, "PE")):
-            if row:
+        ce_rows = [r for r in rows if (_n(r.get("strike")) or 0) >= up_floor][:6]
+        pe_rows = [r for r in reversed(rows) if (_n(r.get("strike")) or 0) <= dn_ceiling][:6]
+        for side_rows, opt in ((ce_rows, "CE"), (pe_rows, "PE")):
+            for row in side_rows:
                 s = _credit_spread(chain, row, opt, 2, lot, expiry, und, scored)
                 if s:
                     setups.append(s)
+                    break
 
     if not setups:
         setups.append({
