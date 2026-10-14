@@ -430,11 +430,15 @@ class _Resp:
         return json.loads(self.text)
 
 
-def _groq(cfg):
-    """LLM over the *same* dict the agents read, the way graph.run_pipeline wires it."""
+def _client(cfg):
+    """LLM over the *same* dict the agents read, the way graph.run_pipeline wires it.
+
+    Ollama is the one provider with no key_env, so the OpenAI-compatible transport is
+    exercised without the suite passing only on machines that happen to have a real key.
+    """
     from copilot.llm import LLM
     cfg.update({"temperature": None, "max_tokens": 4096, "llm_max_retries": 3})
-    return LLM("groq", "openai/gpt-oss-120b", cfg)
+    return LLM("ollama", "llama3.1", cfg)
 
 
 def test_oversized_prompt_shrinks_and_retries(monkeypatch):
@@ -449,7 +453,7 @@ def test_oversized_prompt_shrinks_and_retries(monkeypatch):
     monkeypatch.setattr("copilot.llm.requests.post", post)
     big = "strike data\n" * 20000
     reports = {"chain": big, "volatility": big, "flow": big, "news": big}
-    assert A.risk(_groq(cfg), "neutral", "ctx", reports, "plan", "hist", {}, cfg).endswith("ok")
+    assert A.risk(_client(cfg), "neutral", "ctx", reports, "plan", "hist", {}, cfg).endswith("ok")
     assert len(sent) == 3
     assert len(sent[1]) < len(sent[0]) and len(sent[2]) < len(sent[1])
     assert cfg["debate_history_chars"] < 6000 and cfg["report_char_budget"] < 2600
@@ -459,7 +463,7 @@ def test_oversized_prompt_reports_clearly_when_it_cannot_shrink(monkeypatch):
     from copilot.llm import LLMError
     monkeypatch.setattr("copilot.llm.requests.post", lambda *a, **k: _Resp(413, "Request too large for model"))
     with pytest.raises(LLMError, match="too large"):
-        _groq({"debate_history_chars": 900, "report_char_budget": 300}).invoke("sys", lambda: "prompt")
+        _client({"debate_history_chars": 900, "report_char_budget": 300}).invoke("sys", lambda: "prompt")
 
 
 # ------------------------------------------------------------------ API
