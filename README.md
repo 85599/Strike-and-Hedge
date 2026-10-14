@@ -14,7 +14,7 @@ debate → risk → portfolio manager) sits on top of the same numbers.
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
   <a href="https://github.com/85599/Strike-and-Hedge/actions/workflows/ci.yml"><img src="https://github.com/85599/Strike-and-Hedge/actions/workflows/ci.yml/badge.svg" alt="CI tests"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-brightgreen" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/tests-41%20offline-brightgreen" alt="41 offline tests">
+  <img src="https://img.shields.io/badge/tests-45%20offline-brightgreen" alt="45 offline tests">
   <img src="https://img.shields.io/badge/API%20key-not%20needed-informational" alt="No API key needed">
   <img src="https://img.shields.io/badge/build%20step-none-critical" alt="No build step">
   <a href="https://github.com/85599/Strike-and-Hedge/stargazers"><img src="https://img.shields.io/github/stars/85599/Strike-and-Hedge?style=social" alt="Stars"></a>
@@ -46,8 +46,8 @@ question — *"so what do I actually do?"* — and shows its working:
   (writing *and* buying), India VIX level and its session change, RSI / MACD / Bollinger / EMA-SMA. Scored into a
   bias with plain-English reasons.
 - **Concrete plans, never naked selling.**
-  - Bullish → **BUY CE** (first strike beyond ATM), plus a **futures long** where a futures quote resolves
-  - Bearish → **BUY PE**, plus a **futures short** where a futures quote resolves
+  - Bullish → **BUY CE** (first strike beyond ATM), plus a **futures long** on the parity-derived level
+  - Bearish → **BUY PE**, plus a **futures short** on the parity-derived level
   - Range → **defined-risk credit spreads** — sell near the OI wall, buy a hedge two strikes further out
   - Option stops and targets derive from ATR and OI walls on the *underlying*, converted to premium through delta,
     so they react to real price geometry instead of a fixed percentage.
@@ -79,7 +79,7 @@ Open <http://localhost:8000>. The Signals, Option Chain and Market tabs work wit
 for the AI desk.
 
 ```bash
-python -m pytest tests -q        # 41 offline tests: no network, no keys
+python -m pytest tests -q        # 45 offline tests: no network, no keys
 python tests/ui_harness.py       # the full UI on synthetic data → http://127.0.0.1:8765
 ```
 
@@ -116,7 +116,7 @@ briefly. As of October 2026:
 | FINNIFTY daily history | niftyindices.com | Yahoo delisted `^CNXFINANCE`; NSE's own chart API returns empty for every index |
 | FINNIFTY intraday chart | **none available** | the panel falls back to recent daily bars and labels that it did |
 | Quotes, India VIX, macro | NSE `allIndices`, Yahoo Finance | lot sizes in `copilot/universe.py` are fallbacks; the live lot wins when present |
-| Futures quotes | **NSE retired `quote-derivative`** | `quote-v2` and `last-price-v5` are 404 too, so index futures basis and futures OI are not scored; the buildup panel estimates from option ΔOI and says so |
+| Futures quotes | **NSE retired them** | `quote-derivative`, `quote-v2` and `last-price-v5` are all 404. The desk derives a futures *level* from put-call parity on the ATM strike, labels it as derived, and refuses to score its basis — last-traded option quotes put tens of points of noise in that number. Futures OI and buildup are simply unavailable |
 
 Both exchanges sit behind Akamai, so plain `requests` gets 403s: the clients use `curl_cffi` with a Chrome TLS
 fingerprint and warm cookies, and fall back to `requests` if it is unavailable. Endpoints change and rate-limits
@@ -140,7 +140,7 @@ copilot/
   agents.py graph.py the AI desk: analysts → debate → risk → portfolio manager
   jobs.py memory.py  background runs, report files, decision log
 web/                 dashboard (vanilla JS, no build step)
-tests/               41 offline tests + a synthetic-data UI harness
+tests/               45 offline tests + a synthetic-data UI harness
 docs/                demo video, GIF preview, screenshots
 ```
 
@@ -160,6 +160,9 @@ docs/                demo video, GIF preview, screenshots
 ## Known limits
 
 - No intraday chart for FINNIFTY (no public source); the panel labels the daily-bar fallback.
+- Futures levels are derived from ATM put-call parity because NSE retired its futures endpoints, so a futures card's
+  entry can be tens of points off your broker's price. The card says so, the parity basis is never scored as a signal,
+  and there is no futures OI or buildup anywhere in the score.
 - BSE discontinued Bankex index options, so BANKEX gives a quote but no chain — it errors clearly rather than
   silently loading SENSEX.
 - Signals are computed from a chain snapshot, not tick data; near the 15:30 IST close the settled expiry is dropped

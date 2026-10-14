@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from copilot import analytics, config, graph, greeks, nse, signals, universe  # noqa: E402
+from copilot import chain as ch_mod  # noqa: E402
 from copilot import dataflows as D  # noqa: E402
 from copilot.jobs import JobManager  # noqa: E402
 from copilot.memory import DecisionLog  # noqa: E402
@@ -156,6 +157,57 @@ def test_vix_bid_alongside_the_selloff_confirms_without_doubling():
     risk_off = signals.score_bias(m, None, {"price": 13.5, "change_pct": 6.0}, None, {"change_pct": -0.2})
     assert risk_off["score"] == quiet["score"] - 1
     assert any("risk-off confirmation" in r for r in risk_off["reasons"])
+
+
+# ------------------------------------------------------------------ synthetic futures
+def test_synthetic_futures_land_on_spot_for_a_parity_consistent_book():
+    """The fixture is priced off Black-Scholes, so parity holds exactly and the derived future has
+    to reproduce spot. That is what proves the K·e^(−rT) discount term is applied, not skipped."""
+    ch = make_chain(lean="bull")
+    fut = ch_mod.synthetic_futures(ch)
+    assert fut["ltp"] == pytest.approx(25000.0, abs=0.5)
+    assert fut["basis_pct"] == pytest.approx(0.0, abs=0.01)
+    assert fut["change"] == pytest.approx(4.0)
+    assert fut["synthetic"] and fut["buildup"] is None and fut["oi"] is None
+    s = signals.instant_signal(ch, fut, VIX_OK, TECH_BULL, {"state": "open"})
+    assert any("put-call parity" in w for w in s["warnings"])
+
+
+def test_a_parity_basis_is_not_allowed_to_vote_on_direction():
+    """Real chains quote last traded, not mid, so parity can print a 50-point 'discount' that is
+    pure quote noise. The level is usable for strike-relative stops; the basis is not a signal."""
+    ch = make_chain(lean="range")
+    m = analytics.summarise_chain(ch)
+    tech = {"rsi": 50, "macdh": 0.0, "atr": 150}
+    noise = {**ch_mod.synthetic_futures(ch), "basis_pct": -0.6, "basis": -150.0}
+    derived = signals.score_bias(m, noise, VIX_OK, tech)
+    quoted = signals.score_bias(m, {**noise, "synthetic": False}, VIX_OK, tech)
+    assert derived["score"] == quoted["score"] + 1
+
+
+def test_load_futures_falls_back_to_parity_when_the_endpoint_is_gone(monkeypatch):
+    """NSE retired quote-derivative, quote-v2 and last-price-v5 — every one returns 404."""
+    def gone(*a, **k):
+        raise RuntimeError("HTTP Error 404")
+
+    monkeypatch.setattr(nse, "futures_quote", gone)
+    nifty = ch_mod.load_futures("NIFTY", chain=make_chain(lean="bull"))
+    assert nifty and nifty["synthetic"]
+    # BSE never had a futures quote path here; parity works for SENSEX too.
+    sensex = ch_mod.load_futures("SENSEX", chain=make_chain(name="SENSEX", spot=81000.0))
+    assert sensex and sensex["ltp"] == pytest.approx(81000.0, abs=1.0)
+
+
+def test_a_real_futures_quote_beats_the_parity_proxy(monkeypatch):
+    live = {"ltp": 25050.0, "change": 60.0, "oi": 1.2e6, "oi_chg": 4e4, "lot_size": 75,
+            "expiry": expiry_str(25), "buildup": "long buildup", "basis": 50.0, "basis_pct": 0.2}
+
+    def fake_quote(sym):
+        return dict(live)
+
+    monkeypatch.setattr(nse, "futures_quote", fake_quote)
+    fut = ch_mod.load_futures("NIFTY", chain=make_chain(lean="bull"))
+    assert fut == live and not fut.get("synthetic")
 
 
 def test_expiry_day_warning():

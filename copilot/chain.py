@@ -1,5 +1,6 @@
 """Load a normalised option chain for any supported underlying and attach BS Greeks."""
 import datetime as dt
+import math
 
 from . import bse as bse_mod
 from . import nse as nse_mod
@@ -73,14 +74,58 @@ def load(symbol, expiry=None):
     return _attach_greeks(chain)
 
 
-def load_futures(symbol):
+def synthetic_futures(chain, r=0.065):
+    """Futures level implied by put-call parity on the ATM strike: F = K·e^(−rT) + CE − PE.
+
+    NSE retired /api/quote-derivative along with quote-v2 and last-price-v5, so there is no public
+    futures quote left to read. Parity recovers a level, but it recovers it from *last traded*
+    option prices rather than mids, so it carries tens of points of error on a wide two-sided
+    market. That is fine for a strike-relative stop and target; it is why the caller must not read
+    the resulting basis as a directional signal, and why futures OI and buildup stay None rather
+    than being invented from option OI.
+    """
+    rows = chain.get("rows") or []
+    spot = _num(chain.get("spot"))
+    if not rows or not spot:
+        return None
+    atm = min(rows, key=lambda r: abs((_num(r.get("strike")) or 0) - spot))
+    k = _num(atm.get("strike"))
+    ce, pe = atm.get("ce") or {}, atm.get("pe") or {}
+    c, p = _num(ce.get("ltp")), _num(pe.get("ltp"))
+    if not k or c is None or p is None:
+        return None
+    t = _num(chain.get("dte_years")) or 0.0
+    ltp = k * math.exp(-r * t) + c - p
+    dc, dp = _num(ce.get("change")), _num(pe.get("change"))
+    chg = dc - dp if dc is not None and dp is not None else None
+    prev = ltp - chg if chg is not None else None
+    change_pct = chg / prev * 100 if chg is not None and prev else None
+    return {
+        "expiry": chain.get("expiry"), "ltp": round(ltp, 2),
+        "change": round(chg, 2) if chg is not None else None,
+        "change_pct": round(change_pct, 3) if change_pct is not None else None,
+        "oi": None, "oi_chg": None, "lot_size": chain.get("lot_size"),
+        "basis": round(ltp - spot, 2), "basis_pct": round((ltp - spot) / spot * 100, 3),
+        "buildup": None, "identifier": None, "source": "put-call parity on ATM strike",
+        "synthetic": True,
+    }
+
+
+def load_futures(symbol, chain=None):
     info = und_meta(symbol)
-    if info["exchange"] != "NSE":
-        return None
-    try:
-        fut = nse_mod.futures_quote(info["symbol"])
-    except Exception:
-        return None
-    if fut and not fut.get("lot_size"):
-        fut["lot_size"] = info.get("lot")
-    return fut
+    fut = None
+    if info["exchange"] == "NSE":
+        try:
+            fut = nse_mod.futures_quote(info["symbol"])
+        except Exception:  # noqa: BLE001
+            fut = None
+    if fut:
+        if not fut.get("lot_size"):
+            fut["lot_size"] = info.get("lot")
+        return fut
+    if chain is None:
+        try:
+            chain = load(symbol)
+        except Exception:  # noqa: BLE001
+            return None
+    return synthetic_futures(chain)

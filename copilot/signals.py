@@ -117,7 +117,10 @@ def score_bias(metrics: dict, fut: dict | None, vix: dict | None, tech: dict | N
         reasons.extend(flow_reasons)
 
     if fut:
-        basis = _n(fut.get("basis_pct"))
+        # A parity-derived basis is last-traded-option-price noise, not carry: it can sit 50+ points
+        # off on a two-sided market, which is wider than the ±0.08% threshold here. Use the derived
+        # level for strike-relative stops, never as a directional vote.
+        basis = None if fut.get("synthetic") else _n(fut.get("basis_pct"))
         if basis is not None:
             if basis > 0.08:
                 s += 1
@@ -413,6 +416,10 @@ def instant_signal(chain: dict, fut: dict | None = None, vix: dict | None = None
         warnings.append("Market is closed: this uses the last available chain. Re-check levels after the open.")
     if market and market.get("state") == "preopen":
         warnings.append("Pre-open: option prices are not reliable yet.")
+    if fut and fut.get("synthetic"):
+        warnings.append("Futures level is derived from ATM put-call parity — NSE no longer publishes a futures "
+                        "quote. Expect a few points of difference from your broker's price, and no futures OI "
+                        "or buildup.")
     for s in setups:
         if s.get("rr") is not None and s["rr"] < 1.0 and s["kind"] != "AVOID" and "SPREAD" not in s["kind"]:
             warnings.append(f"{s['kind']}: reward/risk is only {s['rr']:.2f}. Skip unless you have an extra edge.")

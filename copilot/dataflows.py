@@ -37,7 +37,7 @@ def collect(symbol, exchange, trade_date, cfg, analysts, expiry=None):
         provenance.append({"item": "option_chain", "source": "exchange", "status": f"error: {e}"[:160]})
 
     try:
-        fut = ch.load_futures(symbol)
+        fut = ch.load_futures(symbol, chain)
         provenance.append({"item": "futures", "source": "NSE.com" if fut else "n/a", "status": "ok" if fut else "missing"})
     except Exception as e:  # noqa: BLE001
         provenance.append({"item": "futures", "source": "NSE.com", "status": f"error: {e}"[:120]})
@@ -136,7 +136,7 @@ def _flow_pack(fut, signal, tech):
         lines.append(
             f"  LTP {_fmt(fut.get('ltp'))}  chg {_fmt(fut.get('change'))}  OI {_fmt(fut.get('oi'), 0)} "
             f"OI chg {_fmt(fut.get('oi_chg'), 0)}  basis {_fmt(fut.get('basis'))} ({_fmt(fut.get('basis_pct'))}%) "
-            f"buildup {fut.get('buildup')}  expiry {fut.get('expiry')}"
+            f"buildup {fut.get('buildup') or 'n/a'}  source {fut.get('source')}  expiry {fut.get('expiry')}"
         )
     else:
         lines.append("  (no futures quote)")
@@ -198,7 +198,7 @@ def instant(symbol, expiry=None):
                 "_quote_fallback": {"price": spot, "change_pct": change_pct}}
     fut = None
     try:
-        fut = ch.load_futures(symbol)
+        fut = ch.load_futures(symbol, chain)
     except Exception:  # noqa: BLE001
         pass
     vix = mk.india_vix()
