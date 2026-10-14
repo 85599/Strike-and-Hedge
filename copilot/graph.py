@@ -102,7 +102,7 @@ def run_pipeline(job, req, cfg, log: DecisionLog, make_llm=LLM):
     guard()
     if not any(st[f"{a}_report"] for a in sel):
         raise RuntimeError("Every analyst failed. Check Data provenance and your API key.")
-    reports = A._reports({k: st[f"{k}_report"] for k in A.ANALYST_FN}, A._budget(cfg, "report_char_budget", 2600))
+    reports = {k: st[f"{k}_report"] for k in A.ANALYST_FN}
 
     job.phase("Research debate")
     d, rounds = st["investment_debate_state"], int(cfg["max_debate_rounds"])

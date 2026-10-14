@@ -63,6 +63,7 @@ class FakeLLM:
         self.usage, self.model = usage, model
 
     def invoke(self, system, user, max_tokens=None):
+        user = str(user()) if callable(user) else user
         FakeLLM.calls.append(system[:40])
         if self.usage:
             self.usage.add(100, 50)

@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Offline tests (no network, no API keys)
+        env:
+          ANTHROPIC_API_KEY: ""
+          OPENAI_API_KEY: ""
+        run: python -m pytest tests -q
+      - name: UI harness boots on synthetic data
+        run: |
+          python tests/ui_harness.py &
+          sleep 6
+          curl -sf http://127.0.0.1:8765/ | grep -qi "Strike" && echo "UI harness OK"

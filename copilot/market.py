@@ -1,5 +1,6 @@
 """Live Indian market data for F&O underlyings. Unofficial NSE/Yahoo endpoints; personal use only."""
 import datetime as dt
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 
+from . import bse as bse_mod
 from .universe import INDEX_FNO, STOCK_FNO, canonical, meta as und_meta
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -151,6 +153,33 @@ def yf_quote(ysym):
             "as_of": None, "name": None, "currency": "INR"}
 
 
+def yahoo_day_stats(ysym):
+    """One 1y/1d chart call gives CMP, day OHLC, volume and 52w high/low for the screener."""
+    def build():
+        meta, ts, q = yahoo_chart(ysym, "1y", "1d")
+        h, l, c, v, o = (q.get(k) or [] for k in ("high", "low", "close", "volume", "open"))
+        i = _last_valid(c)
+        if i is None:
+            raise ValueError(f"Yahoo has no closes for {ysym}")
+        last = _num(meta.get("regularMarketPrice")) or _num(c[i])
+        j = i - 1
+        while j >= 0 and c[j] is None:
+            j -= 1
+        prev = _num(c[j]) if j >= 0 else (_num(meta.get("previousClose")) or _num(meta.get("chartPreviousClose")))
+        oi = _last_valid(o)
+        hs = [x for x in h if x is not None]
+        ls = [x for x in l if x is not None]
+        return {
+            "last": last, "prev_close": prev,
+            "open": _num(o[oi]) if oi is not None else None,
+            "day_high": _num(meta.get("regularMarketDayHigh")) or (_num(h[i]) if i < len(h) else None),
+            "day_low": _num(meta.get("regularMarketDayLow")) or (_num(l[i]) if i < len(l) else None),
+            "volume": _num(meta.get("regularMarketVolume")) or (_num(v[i]) if i < len(v) else None),
+            "year_high": max(hs) if hs else None, "year_low": min(ls) if ls else None,
+        }
+    return _cached(("ystats", ysym), 120, build)
+
+
 def _finish(raw, symbol, ex, ysym, source, errors):
     price, prev = raw["price"], raw.get("prev_close")
     chg = price - prev if prev else None
@@ -184,6 +213,8 @@ def get_quote(symbol, ex="NSE", force=False):
                     raise ValueError("index missing")
                 return row | {"name": symbol, "currency": "INR"}
             chain.append(("NSE.com", idx))
+        elif info["kind"] == "index" and ex == "BSE":
+            chain.append(("BSE.com", lambda: bse_mod.quote(symbol)))
         elif ex == "NSE" and info["kind"] == "stock":
             chain.append(("NSE.com", lambda: nse_quote(symbol)))
         chain += [("Yahoo", lambda: yahoo_quote(ysym)), ("yfinance", lambda: yf_quote(ysym))]
@@ -268,13 +299,19 @@ def history(ysym, start=None, end=None, period="2y"):
         except Exception:  # noqa: BLE001
             df = pd.DataFrame()
         if df is None or df.empty:
-            meta, ts, q = yahoo_chart(ysym, "5y" if period in ("2y", "5y") else period, "1d")
-            df = pd.DataFrame({"Open": q["open"], "High": q["high"], "Low": q["low"], "Close": q["close"],
-                               "Volume": q["volume"]}, index=pd.to_datetime(ts, unit="s", utc=True).tz_convert(IST))
-            if start:
-                df = df[df.index >= pd.Timestamp(start, tz=IST)]
-            if end:
-                df = df[df.index < pd.Timestamp(end, tz=IST)]
+            try:
+                meta, ts, q = yahoo_chart(ysym, "5y" if period in ("2y", "5y") else period, "1d")
+                df = pd.DataFrame({"Open": q["open"], "High": q["high"], "Low": q["low"], "Close": q["close"],
+                                   "Volume": q["volume"]}, index=pd.to_datetime(ts, unit="s", utc=True).tz_convert(IST))
+            except Exception:  # noqa: BLE001
+                name = NIFTY_INDEX_BY_YAHOO.get(ysym)
+                if not name:
+                    raise
+                df = nifty_history(name, period)
+        if start:
+            df = df[df.index >= pd.Timestamp(start, tz=IST).normalize()]
+        if end:
+            df = df[df.index < pd.Timestamp(end, tz=IST).normalize()]
         df = df.dropna(subset=["Close"])
         df.index = pd.DatetimeIndex([pd.Timestamp(d).tz_localize(None) if pd.Timestamp(d).tzinfo else pd.Timestamp(d)
                                      for d in df.index]).normalize()
@@ -283,17 +320,81 @@ def history(ysym, start=None, end=None, period="2y"):
     return _cached(("h", ysym, start, end, period), 60, build)
 
 
+NIFTY_INDEX_BY_YAHOO = {v["yahoo"]: v["nifty_index"] for v in INDEX_FNO.values() if v.get("nifty_index")}
+NIFTY_SITE = "https://www.niftyindices.com/BackPage/getHistoricaldatatabletoString"
+_PERIOD_DAYS = {"6mo": 200, "1y": 400, "2y": 760, "5y": 1850}
+
+
+def nifty_history(name, period="1y"):
+    """Daily OHLC for an NSE index straight from NSE's own index site.
+
+    Yahoo delisted some index tickers (^CNXFINANCE), and NSE's api/chart endpoints now
+    answer empty for every index, so this is the remaining source of index history.
+    Index series carry no exchange volume, hence the NaN Volume column.
+    """
+    end = now_ist().date()
+    start = end - dt.timedelta(days=_PERIOD_DAYS.get(period, 400))
+    cinfo = "{'name':'%s','startDate':'%s','endDate':'%s','indexName':'%s'}" % (
+        name, start.strftime("%d-%b-%Y"), end.strftime("%d-%b-%Y"), name)
+    r = requests.post(NIFTY_SITE, data=json.dumps({"cinfo": cinfo}),
+                      headers={"User-Agent": UA, "Content-Type": "application/json; charset=utf-8",
+                               "X-Requested-With": "XMLHttpRequest",
+                               "Referer": "https://www.niftyindices.com/", "Origin": "https://www.niftyindices.com"},
+                      timeout=20)
+    r.raise_for_status()
+    rows = r.json()
+    if isinstance(rows, dict):
+        rows = json.loads(rows["d"])
+    if not rows:
+        raise ValueError(f"niftyindices has no history for {name}")
+    df = pd.DataFrame(rows)
+    df.index = pd.DatetimeIndex(pd.to_datetime(df["HistoricalDate"], format="%d %b %Y")).normalize()
+    out = df[["OPEN", "HIGH", "LOW", "CLOSE"]].apply(pd.to_numeric, errors="coerce")
+    out.columns = ["Open", "High", "Low", "Close"]
+    out["Volume"] = float("nan")
+    return out.sort_index()
+
+
 RANGES = {"1d": ("1d", "5m"), "5d": ("5d", "15m"), "1mo": ("1mo", "1d"), "6mo": ("6mo", "1d"),
           "1y": ("1y", "1d"), "5y": ("5y", "1wk")}
+
+
+_DAILY_BARS = {"1d": 8, "5d": 8, "1mo": 23, "6mo": 126, "1y": 250, "2y": 500, "5y": 1250}
+
+
+def _chart_from_history(ysym, rng, iv):
+    """Daily charts for tickers Yahoo no longer serves (^CNXFINANCE) — same shape as the
+    Yahoo payload so the frontend needs no special case. Index history has no volume.
+    NSE publishes no intraday index series either, so 1d/5d degrade to recent daily bars."""
+    n = _DAILY_BARS.get(rng)
+    df = history(ysym, period=rng if rng in _PERIOD_DAYS else "2y").tail(n)
+    if df.empty:
+        raise ValueError(f"no daily history for {ysym}")
+    if iv == "1wk":
+        df = df.resample("W").agg({"Open": "first", "High": "max", "Low": "min",
+                                   "Close": "last", "Volume": "sum"}).dropna(subset=["Close"])
+        # sum() turns an all-NaN week into 0 — indices publish no volume, not zero volume.
+        df["Volume"] = df["Volume"].where(df["Volume"] > 0)
+    intraday = iv not in ("1d", "1wk")
+    vol = [None if v != v else float(v) for v in df["Volume"]]
+    return {"range": rng, "interval": iv if not intraday else "1d",
+            "note": "Daily bars — NSE and Yahoo publish no intraday series for this index" if intraday else None,
+            "prev_close": round(float(df["Close"].iloc[-2]), 2) if len(df) > 1 else None,
+            "t": [int(d.tz_localize(IST).timestamp()) for d in df.index],
+            "c": [round(float(c), 2) for c in df["Close"]],
+            "h": [float(x) for x in df["High"]], "l": [float(x) for x in df["Low"]], "v": vol}
 
 
 def chart_series(ysym, rng="1d"):
     r, iv = RANGES.get(rng, RANGES["1d"])
 
     def build():
-        meta, ts, q = yahoo_chart(ysym, r, iv)
+        try:
+            meta, ts, q = yahoo_chart(ysym, r, iv)
+        except Exception:  # noqa: BLE001
+            return _chart_from_history(ysym, rng, iv)
         rows = [(t, c, h, l, v) for t, c, h, l, v in zip(ts, q["close"], q["high"], q["low"], q["volume"]) if c is not None]
-        return {"range": rng, "interval": iv, "prev_close": _num(meta.get("chartPreviousClose")),
+        return {"range": rng, "interval": iv, "note": None, "prev_close": _num(meta.get("chartPreviousClose")),
                 "t": [x[0] for x in rows], "c": [round(x[1], 2) for x in rows],
                 "h": [x[2] for x in rows], "l": [x[3] for x in rows], "v": [x[4] for x in rows]}
 

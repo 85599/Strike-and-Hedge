@@ -1,4 +1,4 @@
-"""Options & Futures Copilot Pro server.
+"""Strike & Hedge — Supercharge Your Stock Trading.
 Run:  uvicorn server:app --port 8000      then open http://localhost:8000
 Data: NSE / BSE / Yahoo unofficial endpoints (personal use). Agents: copilot/graph.py.
 Signals (/api/signal, /api/scan) are rule-based and need no LLM key; the AI desk (/api/runs) does."""
@@ -13,13 +13,15 @@ from fastapi.staticfiles import StaticFiles
 
 from copilot import config, market as mk
 from copilot import dataflows as D
+from copilot import nse as mk_nse
 from copilot.jobs import JobManager
 from copilot.universe import INDEX_FNO, STOCK_FNO, canonical, meta as und_meta
 
-app = FastAPI(title="Options & Futures Copilot Pro")
+app = FastAPI(title="Strike & Hedge")
 jobs = JobManager(config.DEFAULTS["results_dir"], config.DEFAULTS["data_dir"])
 EXCH = "^(NSE|BSE)$"
 SIGNAL_TTL = 15
+MAX_CACHE = 64
 _cache, _lock = {}, threading.Lock()
 DEFAULT_SCAN = ["NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY"]
 
@@ -34,6 +36,9 @@ def _instant(sym, expiry=None):
             return hit[1]
     val = D.instant(sym, expiry)
     with _lock:
+        if len(_cache) >= MAX_CACHE:
+            oldest = min(_cache, key=lambda k: _cache[k][0])
+            del _cache[oldest]
         _cache[key] = (now, val)
     return val
 
@@ -94,7 +99,7 @@ def chart(sym: str, range: str = "1d"):
     try:
         return mk.chart_series(mk.resolve_symbol(sym, und_meta(sym).get("exchange") or "NSE"), range)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(404, f"No chart data for {sym}: {e}")
+        raise HTTPException(404, f"No chart data for {sym} from the Yahoo feed")
 
 
 @app.get("/api/search")
@@ -138,10 +143,21 @@ def scan(symbols: str = Query(",".join(DEFAULT_SCAN), description="NIFTY,BANKNIF
         try:
             d = _instant(s)
             sig, p = d["signal"], d["signal"].get("primary") or {}
-            return {"symbol": s, "spot": d["chain"].get("spot"), "expiry": d["chain"].get("expiry"), "bias": sig.get("bias"),
+            fut = d.get("futures")
+            qf = d.get("_quote_fallback") or {}
+            spot = d["chain"].get("spot") or qf.get("price")
+            change_pct = qf.get("change_pct")
+            if fut and not change_pct:
+                change_pct = fut.get("change_pct")
+            if sig.get("error"):
+                return {"symbol": s, "spot": spot, "change_pct": change_pct, "error": sig["error"]}
+            return {"symbol": s, "spot": spot, "expiry": d["chain"].get("expiry"), "bias": sig.get("bias"),
                     "confidence": sig.get("confidence"), "pcr": (sig.get("metrics") or {}).get("pcr_oi"),
                     "kind": p.get("kind"), "instrument": p.get("instrument"), "entry": p.get("entry"),
-                    "stop": p.get("stop"), "target": p.get("target"), "rr": p.get("rr")}
+                    "stop": p.get("stop"), "target": p.get("target"), "rr": p.get("rr"),
+                    "buildup": fut.get("buildup") if fut else None,
+                    "change_pct": change_pct,
+                    "volume": fut.get("volume") if fut else None}
         except Exception as e:  # noqa: BLE001
             return {"symbol": s, "error": f"{type(e).__name__}: {str(e)[:140]}"}
 
@@ -188,6 +204,171 @@ def run_report(run_id: str, download: bool = False):
 @app.get("/api/decisions")
 def decisions():
     return list(reversed(jobs.log.all()))[:100]
+
+
+_MO_TTL = 60
+_mo_cache = {}
+AD_INDICES = ["NIFTY 50", "NIFTY BANK", "NIFTY IT", "NIFTY AUTO", "NIFTY PHARMA",
+              "NIFTY FMCG", "NIFTY METAL", "NIFTY FIN SERVICE"]
+
+
+def _ttl_get(key, ttl, fn):
+    now = time.time()
+    hit = _mo_cache.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    val = fn()
+    _mo_cache[key] = (now, val)
+    if len(_mo_cache) > 32:
+        oldest = min(_mo_cache, key=lambda k: _mo_cache[k][0])
+        del _mo_cache[oldest]
+    return val
+
+
+def _stat_row(sym):
+    try:
+        st = mk.yahoo_day_stats(sym + ".NS")
+    except Exception:  # noqa: BLE001  one bad symbol must not sink the whole index
+        return None
+    last, prev = st.get("last"), st.get("prev_close")
+    chg = (last - prev) if (last and prev) else None
+    return {
+        "symbol": sym, "open": st.get("open"), "day_high": st.get("day_high"), "day_low": st.get("day_low"),
+        "last": last, "prev_close": prev, "change": chg,
+        "change_pct": (chg / prev * 100) if (chg is not None and prev) else None,
+        "volume": st.get("volume"), "year_high": st.get("year_high"), "year_low": st.get("year_low"),
+    }
+
+
+def _index_rows(index):
+    def build():
+        members = und_meta_members(index)
+        rows, failed = [], 0
+        with ThreadPoolExecutor(10) as pool:
+            for r in pool.map(_stat_row, members):
+                if r and r.get("last"):
+                    rows.append(r)
+                else:
+                    failed += 1
+        buckets = mk_nse.classify_rows(rows)
+        adv = sum(1 for r in rows if (r["change_pct"] or 0) > 0)
+        dec = sum(1 for r in rows if (r["change_pct"] or 0) < 0)
+        return {"index": index, "rows": rows, "buckets": {k: v[:30] for k, v in buckets.items()},
+                "counts": {k: len(v) for k, v in buckets.items()},
+                "advance": adv, "decline": dec, "unchanged": len(rows) - adv - dec, "failed": failed}
+    return _ttl_get("mo:" + index, _MO_TTL, build)
+
+
+def und_meta_members(index):
+    from copilot.universe import YAHOO_INDEX_MEMBERS
+    return YAHOO_INDEX_MEMBERS.get(index) or []
+
+
+@app.get("/api/market-overview")
+def market_overview(index: str = Query("NIFTY 50")):
+    """Strike-style screener: constituents + gainer/loser/52w/gap/volume buckets."""
+    if not und_meta_members(index):
+        raise HTTPException(404, f"No member list for {index}")
+    return _index_rows(index)
+
+
+def _oi_buildup_proxy(sym):
+    """Fallback when NSE futures OI is unavailable (region-blocked / closed market).
+
+    Derives a buildup read from data that DOES work here: total option-chain ΔOI
+    (fresh positioning) crossed with the underlying's spot direction from Yahoo.
+    Same sign logic as futures buildup — long/short buildup on rising OI,
+    covering/unwinding on falling OI.
+    """
+    info = und_meta(sym)
+    raw = mk_nse.option_chain(info["symbol"], kind=info["oc"])
+    rows = raw.get("rows") or []
+    oi_chg = 0.0
+    for r in rows:
+        for side in ("ce", "pe"):
+            leg = r.get(side) or {}
+            oi_chg += leg.get("oi_chg") or 0
+    st = mk.yahoo_day_stats(info["yahoo"])
+    last, prev = st.get("last"), st.get("prev_close")
+    chg = (last - prev) if (last and prev) else None
+    chg_pct = (chg / prev * 100) if (chg is not None and prev) else None
+    buildup = mk_nse._buildup(chg_pct, oi_chg)
+    return {
+        "symbol": sym, "ltp": last, "change": chg, "change_pct": chg_pct,
+        "oi": None, "oi_chg": oi_chg, "buildup": buildup, "spot": last,
+        "expiry": raw.get("expiry"), "proxy": True,
+    }
+
+
+@app.get("/api/futures-activity")
+def futures_activity():
+    """Long/short buildup, short covering, long unwinding across liquid F&O contracts."""
+    def build():
+        from copilot.universe import FUT_ACTIVE_POOL
+        cats = {"long buildup": [], "short buildup": [], "short covering": [], "long unwinding": []}
+        live = tried = 0
+
+        def one(sym):
+            nonlocal live, tried
+            try:
+                fut = mk_nse.futures_quote(sym)
+                if fut and fut.get("oi") is not None:
+                    fut = dict(fut)
+                    fut["symbol"] = sym
+                    fut["proxy"] = False
+                    live += 1
+                    return fut
+            except Exception:  # noqa: BLE001
+                pass
+            tried += 1
+            return None
+
+        rows = []
+        with ThreadPoolExecutor(6) as pool:
+            rows = [r for r in pool.map(one, FUT_ACTIVE_POOL) if r]
+
+        # No live futures OI (region-blocked or closed market): derive from option ΔOI.
+        source, note = "futures", None
+        if not rows:
+            source = "option-oi"
+            note = ("Live futures OI is unavailable from this network/market hours — "
+                    "buildup is estimated from option-chain ΔOI vs spot direction.")
+
+            def proxy(sym):
+                try:
+                    return _oi_buildup_proxy(sym)
+                except Exception:  # noqa: BLE001
+                    return None
+
+            with ThreadPoolExecutor(6) as pool:
+                rows = [r for r in pool.map(proxy, FUT_ACTIVE_POOL) if r]
+
+        for fut in rows:
+            b = fut.get("buildup")
+            if b in cats:
+                cats[b].append(fut)
+        for k in cats:
+            cats[k].sort(key=lambda c: -(abs(c.get("change") or c.get("oi_chg") or 0)))
+        return {"categories": {k: v[:20] for k, v in cats.items()},
+                "counts": {k: len(v) for k, v in cats.items()},
+                "source": source, "note": note}
+    return _ttl_get("futact", 90, build)
+
+
+@app.get("/api/advance-decline")
+def advance_decline():
+    """Advance/decline breadth for major indices (shared cache with market overview)."""
+    def build():
+        out = []
+        for ix in AD_INDICES:
+            try:
+                r = _index_rows(ix)
+                out.append({"index": ix, "advance": r["advance"], "decline": r["decline"],
+                            "unchanged": r["unchanged"], "total": len(r["rows"])})
+            except Exception:  # noqa: BLE001
+                continue
+        return {"indices": out}
+    return _ttl_get("ad", 90, build)
 
 
 app.mount("/", StaticFiles(directory=str(pathlib.Path(__file__).resolve().parent / "web"), html=True), name="web")

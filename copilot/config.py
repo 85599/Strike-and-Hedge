@@ -1,4 +1,4 @@
-"""Config for Options & Futures Copilot Pro. Every key overridable with a COPILOT_* env var or per run from the UI."""
+"""Config for Strike & Hedge. Every key overridable with a COPILOT_* env var or per run from the UI."""
 import os
 import pathlib
 
@@ -25,11 +25,11 @@ PROVIDERS = {
     "openai": {"label": "OpenAI", "kind": "openai", "key_env": "OPENAI_API_KEY",
                "url": "https://api.openai.com/v1", "deep": "gpt-5.5", "quick": "gpt-5.4-mini"},
     "google": {"label": "Google (Gemini)", "kind": "google", "key_env": "GOOGLE_API_KEY",
-               "url": "https://generativelanguage.googleapis.com/v1beta", "deep": "", "quick": ""},
+               "url": "https://generativelanguage.googleapis.com/v1beta", "deep": "gemini-2.5-pro", "quick": "gemini-2.0-flash"},
     "deepseek": {"label": "DeepSeek", "kind": "openai", "key_env": "DEEPSEEK_API_KEY",
                  "url": "https://api.deepseek.com", "deep": "deepseek-reasoner", "quick": "deepseek-chat"},
     "groq": {"label": "Groq", "kind": "openai", "key_env": "GROQ_API_KEY",
-             "url": "https://api.groq.com/openai/v1", "deep": "", "quick": ""},
+             "url": "https://api.groq.com/openai/v1", "deep": "llama-3.3-70b-versatile", "quick": "llama-3.1-8b-instant"},
     "openrouter": {"label": "OpenRouter", "kind": "openai", "key_env": "OPENROUTER_API_KEY",
                    "url": "https://openrouter.ai/api/v1", "deep": "", "quick": ""},
     "ollama": {"label": "Ollama (local)", "kind": "openai", "key_env": None,

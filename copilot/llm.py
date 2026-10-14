@@ -42,6 +42,7 @@ class LLM:
         if p["key_env"] and not self.key and provider != "openai_compatible":
             raise LLMError(f"{p['key_env']} is not set. Add it to the .env file and restart the server.")
         self.temp, self.max_tokens, self.retries = cfg.get("temperature"), cfg.get("max_tokens") or 4096, cfg.get("llm_max_retries") or 3
+        self.cfg = cfg
         self.usage = usage or Usage()
 
     def _request(self, system, user, max_tokens):
@@ -78,11 +79,27 @@ class LLM:
         u = j.get("usage", {})
         return msg.get("content") or "", u.get("prompt_tokens"), u.get("completion_tokens")
 
+    def shrink_prompt(self, floor=900):
+        """Cut the agents' context budgets so the next attempt builds a smaller prompt. Returns False once they hit the floor."""
+        key = "debate_history_chars"
+        try:
+            cur = int(self.cfg.get(key) or 0)
+        except (TypeError, ValueError):
+            return False
+        nxt = max(int(cur * 0.55), floor)
+        if cur <= floor:
+            return False
+        self.cfg[key] = nxt
+        self.cfg["report_char_budget"] = max(int(self.cfg.get("report_char_budget") or 2600) // 2, 300)
+        return True
+
     def invoke(self, system, user, max_tokens=None):
-        url, hdr, body, _ = self._request(system, user, max_tokens or self.max_tokens)
-        hdr = {"Content-Type": "application/json", **hdr}
+        """`user` may be a callable so a rejected prompt can be rebuilt from the (now smaller) budgets."""
+        build = user if callable(user) else (lambda: user)
         last = None
         for attempt in range(self.retries + 1):
+            url, hdr, body, _ = self._request(system, str(build()), max_tokens or self.max_tokens)
+            hdr = {"Content-Type": "application/json", **hdr}
             try:
                 r = requests.post(url, headers=hdr, json=body, timeout=240)
             except requests.RequestException as e:
@@ -95,6 +112,12 @@ class LLM:
                         raise LLMError(f"{self.provider}/{self.model} returned an empty answer")
                     return text.strip()
                 last = f"HTTP {r.status_code}: {r.text[:300]}"
+                if r.status_code == 413:
+                    if not self.shrink_prompt():
+                        raise LLMError(f"{self.provider}/{self.model} rejected the prompt as too large ({last}). "
+                                       "The desk's context no longer fits this model's token-per-minute limit — pick a "
+                                       "model with a larger limit, or run fewer analysts.")
+                    continue
                 if r.status_code not in RETRY:
                     raise LLMError(last)
                 wait = r.headers.get("retry-after")

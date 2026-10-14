@@ -147,32 +147,39 @@ def _reports(r, budget=2600):
             f"News report: {_cap(absent(r.get('news'), 'news'), budget)}")
 
 
+def _reps(r, cfg):
+    """Re-rendered per call so a prompt that was rejected as too large actually shrinks on the next attempt."""
+    return _reports(r, _budget(cfg, "report_char_budget", 2600))
+
+
 def bull(llm, ctx, reports, history, last_bear, cfg):
-    hist = _tail(history, _budget(cfg, "debate_history_chars", 6000))
-    opp = _cap(_opp(last_bear, "bear"), _budget(cfg, "debate_history_chars", 6000))
-    p = (f"You are the Bull F&O Analyst. Argue for longs: BUY CE, futures long, or put writing only if defined-risk "
-         f"is already in the pack. Cite PCR, put walls, futures buildup.\n\n{ctx}\n{reports}\n"
-         f"Debate history: {hist}\nLast bear: {opp}\nCounter the bear with numbers from the pack.")
-    return "Bull Analyst: " + llm.invoke("You are the Bull Researcher on an Indian F&O desk." + lang(cfg), p, max_tokens=1600)
+    def build():
+        b = _budget(cfg, "debate_history_chars", 6000)
+        return (f"You are the Bull F&O Analyst. Argue for longs: BUY CE, futures long, or put writing only if defined-risk "
+                f"is already in the pack. Cite PCR, put walls, futures buildup.\n\n{ctx}\n{_reps(reports, cfg)}\n"
+                f"Debate history: {_tail(history, b)}\nLast bear: {_cap(_opp(last_bear, 'bear'), b)}\n"
+                f"Counter the bear with numbers from the pack.")
+    return "Bull Analyst: " + llm.invoke("You are the Bull Researcher on an Indian F&O desk." + lang(cfg), build, max_tokens=1600)
 
 
 def bear(llm, ctx, reports, history, last_bull, cfg):
-    hist = _tail(history, _budget(cfg, "debate_history_chars", 6000))
-    opp = _cap(_opp(last_bull, "bull"), _budget(cfg, "debate_history_chars", 6000))
-    p = (f"You are the Bear F&O Analyst. Argue for shorts: BUY PE, futures short, or call writing only if in the pack. "
-         f"Cite call walls, VIX, weak PCR, short buildup.\n\n{ctx}\n{reports}\n"
-         f"Debate history: {hist}\nLast bull: {opp}\nCounter the bull with numbers from the pack.")
-    return "Bear Analyst: " + llm.invoke("You are the Bear Researcher on an Indian F&O desk." + lang(cfg), p, max_tokens=1600)
+    def build():
+        b = _budget(cfg, "debate_history_chars", 6000)
+        return (f"You are the Bear F&O Analyst. Argue for shorts: BUY PE, futures short, or call writing only if in the pack. "
+                f"Cite call walls, VIX, weak PCR, short buildup.\n\n{ctx}\n{_reps(reports, cfg)}\n"
+                f"Debate history: {_tail(history, b)}\nLast bull: {_cap(_opp(last_bull, 'bull'), b)}\n"
+                f"Counter the bull with numbers from the pack.")
+    return "Bear Analyst: " + llm.invoke("You are the Bear Researcher on an Indian F&O desk." + lang(cfg), build, max_tokens=1600)
 
 
 def research_manager(llm, ctx, history, cfg):
-    hist = _tail(history, _budget(cfg, "debate_history_chars", 6000))
-    p = (f"As Research Manager, pick a side and write the F&O plan for the trader.\n\n{ctx}\n\n{SCALE}\n\n{DECIDE}\n\n"
-         f"**Debate:**\n{hist}\n\n## Output\n"
-         "- **Recommendation**: Buy / Overweight / Hold / Underweight / Sell\n"
-         "- **Rationale**\n- **Preferred structure**: BUY CE / BUY PE / SELL CE SPREAD / SELL PE SPREAD / FUT LONG / FUT SHORT / AVOID\n"
-         "- **Key levels**: put wall, call wall, max pain")
-    return llm.invoke("You are the Research Manager on an F&O desk." + lang(cfg), p)
+    def build():
+        return (f"As Research Manager, pick a side and write the F&O plan for the trader.\n\n{ctx}\n\n{SCALE}\n\n{DECIDE}\n\n"
+                f"**Debate:**\n{_tail(history, _budget(cfg, 'debate_history_chars', 6000))}\n\n## Output\n"
+                "- **Recommendation**: Buy / Overweight / Hold / Underweight / Sell\n"
+                "- **Rationale**\n- **Preferred structure**: BUY CE / BUY PE / SELL CE SPREAD / SELL PE SPREAD / FUT LONG / FUT SHORT / AVOID\n"
+                "- **Key levels**: put wall, call wall, max pain")
+    return llm.invoke("You are the Research Manager on an F&O desk." + lang(cfg), build)
 
 
 def trader(llm, ctx, plan, flow_report, live_note, rule_signal, cfg):
@@ -181,16 +188,18 @@ def trader(llm, ctx, plan, flow_report, live_note, rule_signal, cfg):
             f"Risk about {cfg.get('risk_per_trade_pct', 1)}% of a ₹1,00,000 notional at the stop. "
             "A rule-based engine already computed candidate setups — prefer those numbers; do not invent LTPs. "
             "Absolute rupees, not percentages." + lang(cfg))
-    u = (f"Research plan:\n{_cap(plan, _budget(cfg, 'debate_history_chars', 6000))}\n\n{ctx}\n{live_note}\n\n"
-         f"Flow/technical report:\n{_cap(absent(flow_report, 'flow'), 2 * _budget(cfg, 'report_char_budget', 2600))}\n\n"
-         f"RULE ENGINE (code, not optional colour):\n{_cap(str(rule_signal)[:3500], 3500)}\n\n"
-         "## Output\n"
-         "- **Action**: BUY CE / BUY PE / SELL CE SPREAD / SELL PE SPREAD / FUT LONG / FUT SHORT / AVOID\n"
-         "- **Instrument**: e.g. NIFTY 25000 CE 09-Oct-2025\n"
-         "- **Entry**, **Stop Loss**, **Target**, **Exit** (when to book / trail)\n"
-         "- **Lots** and **Max loss ₹**\n- **Reasoning**\n"
-         "End with: FINAL TRANSACTION PROPOSAL: **BUY CE/BUY PE/SELL CE SPREAD/SELL PE SPREAD/FUT LONG/FUT SHORT/AVOID**")
-    return llm.invoke(sysm, u)
+    def build():
+        b = _budget(cfg, "debate_history_chars", 6000)
+        return (f"Research plan:\n{_cap(plan, b)}\n\n{ctx}\n{live_note}\n\n"
+                f"Flow/technical report:\n{_cap(absent(flow_report, 'flow'), 2 * _budget(cfg, 'report_char_budget', 2600))}\n\n"
+                f"RULE ENGINE (code, not optional colour):\n{_cap(str(rule_signal)[:3500], 3500)}\n\n"
+                "## Output\n"
+                "- **Action**: BUY CE / BUY PE / SELL CE SPREAD / SELL PE SPREAD / FUT LONG / FUT SHORT / AVOID\n"
+                "- **Instrument**: e.g. NIFTY 25000 CE 09-Oct-2025\n"
+                "- **Entry**, **Stop Loss**, **Target**, **Exit** (when to book / trail)\n"
+                "- **Lots** and **Max loss ₹**\n- **Reasoning**\n"
+                "End with: FINAL TRANSACTION PROPOSAL: **BUY CE/BUY PE/SELL CE SPREAD/SELL PE SPREAD/FUT LONG/FUT SHORT/AVOID**")
+    return llm.invoke(sysm, build)
 
 
 RISK_ROLES = {
@@ -202,23 +211,27 @@ RISK_ROLES = {
 
 def risk(llm, who, ctx, reports, trader_plan, history, last, cfg):
     title, mission = RISK_ROLES[who]
-    b = _budget(cfg, "debate_history_chars", 6000)
-    others = "\n".join(f"Last {k}: {_cap(_opp(last.get(k), k), b)}" for k in RISK_ROLES if k != who)
-    hist = _tail(history, b)
-    p = (f"As the {title}, {mission}\n\nTrader:\n{_cap(trader_plan, b)}\n\n{ctx}\n{reports}\nHistory: {hist}\n{others}\n"
-         "Debate the others. Cite only pack facts. Reject any naked short option outright; credit spreads need a hedge leg.")
-    return f"{title.split()[0]} Analyst: " + llm.invoke(f"You are the {title}." + lang(cfg), p, max_tokens=1600)
+
+    def build():
+        b = _budget(cfg, "debate_history_chars", 6000)
+        others = "\n".join(f"Last {k}: {_cap(_opp(last.get(k), k), b)}" for k in RISK_ROLES if k != who)
+        return (f"As the {title}, {mission}\n\nTrader:\n{_cap(trader_plan, b)}\n\n{ctx}\n{_reps(reports, cfg)}\n"
+                f"History: {_tail(history, b)}\n{others}\n"
+                "Debate the others. Cite only pack facts. Reject any naked short option outright; credit spreads need a hedge leg.")
+    return f"{title.split()[0]} Analyst: " + llm.invoke(f"You are the {title}." + lang(cfg), build, max_tokens=1600)
 
 
 def portfolio_manager(llm, ctx, research_plan, trader_plan, history, lessons, cfg):
     les = f"- Lessons:\n{lessons}\n" if lessons else ""
-    b = _budget(cfg, "debate_history_chars", 6000)
-    p = (f"As Portfolio Manager, approve or reject the F&O proposal.\n\n{ctx}\n\n{SCALE}\n\n"
-         f"Research: {_cap(research_plan, b)}\nTrader: {_cap(trader_plan, b)}\n{les}\nRisk debate:\n{_tail(history, b)}\n\n"
-         f"{DECIDE}\n\n## Output\n- **Rating**: Buy / Overweight / Hold / Underweight / Sell\n"
-         "- **Action** and **Instrument**\n- **Entry**, **Stop Loss**, **Target**, **Exit**\n"
-         "- **Executive Summary**\n- **What would kill the thesis**")
-    return llm.invoke("You are the Portfolio Manager on an Indian F&O desk." + lang(cfg), p)
+
+    def build():
+        b = _budget(cfg, "debate_history_chars", 6000)
+        return (f"As Portfolio Manager, approve or reject the F&O proposal.\n\n{ctx}\n\n{SCALE}\n\n"
+                f"Research: {_cap(research_plan, b)}\nTrader: {_cap(trader_plan, b)}\n{les}\nRisk debate:\n{_tail(history, b)}\n\n"
+                f"{DECIDE}\n\n## Output\n- **Rating**: Buy / Overweight / Hold / Underweight / Sell\n"
+                "- **Action** and **Instrument**\n- **Entry**, **Stop Loss**, **Target**, **Exit**\n"
+                "- **Executive Summary**\n- **What would kill the thesis**")
+    return llm.invoke("You are the Portfolio Manager on an Indian F&O desk." + lang(cfg), build)
 
 
 def reflect(llm, decision, outcome, cfg):

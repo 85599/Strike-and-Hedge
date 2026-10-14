@@ -56,6 +56,11 @@ def implied_vol(price, s, k, t, r=0.065, kind="CE", q=0.0, lo=1e-4, hi=5.0):
         return None
     a, b = lo, hi
     fa = bs_price(s, k, t, r, a, kind, q) - price
+    fb = bs_price(s, k, t, r, b, kind, q) - price
+    # Outside the bracket the quote carries no solvable volatility (deep-ITM bids trade below
+    # the lowest-vol model price). Returning the boundary would surface as a fake 500% IV.
+    if fa > 0 or fb < 0:
+        return None
     for _ in range(60):
         m = 0.5 * (a + b)
         fm = bs_price(s, k, t, r, m, kind, q) - price

@@ -97,6 +97,13 @@ def _parse_expiry(txt):
     return None
 
 
+def _live_expiries(expiries, now=None):
+    """Drop expiries that have already settled. NSE/BSE keep yesterday's expiry at the head of the list for hours
+    after the 15:30 close, and that chain is all ₹0.05 premiums with greeks that are pure noise."""
+    now = now or dt.datetime.now(IST)
+    return [d for d in expiries if (_parse_expiry(d) or now + dt.timedelta(days=1)) > now]
+
+
 def _leg_from_nse(raw):
     if not raw:
         return None
@@ -143,8 +150,8 @@ def option_chain(symbol, kind="indices", expiry=None):
     type_param = "Indices" if kind == "indices" else "Equity"
 
     # 1) Resolve expiry list
-    expiries = _expiries_for(symbol)
-    chosen = expiry if expiry and expiry in expiries else (expiries[0] if expiries else None)
+    expiries = _live_expiries(_expiries_for(symbol))
+    chosen = expiry if expiry in expiries else (expiries[0] if expiries else None)
 
     # 2) Fetch chain (with expiry if we have one)
     params = {"type": type_param, "symbol": symbol}
@@ -157,7 +164,7 @@ def option_chain(symbol, kind="indices", expiry=None):
     data_rows = (raw.get("filtered") or {}).get("data") or rec.get("data") or []
 
     if not expiries:
-        expiries = rec.get("expiryDates") or []
+        expiries = _live_expiries(rec.get("expiryDates") or [])
     if not chosen:
         chosen = expiry if expiry in expiries else (expiries[0] if expiries else None)
 
@@ -259,3 +266,34 @@ def futures_quote(symbol):
 
 def fii_dii():
     return NSE.get("/api/fiidiiTradeReact")
+
+
+def classify_rows(rows):
+    """Strike-style screener buckets computed from index constituents."""
+    buckets = {"gainers": [], "losers": [], "high52": [], "low52": [], "open_high": [],
+               "open_low": [], "gap_up": [], "gap_down": [], "volume": []}
+    vols = sorted([r["volume"] or 0 for r in rows], reverse=True)
+    vol_cut = vols[min(9, len(vols) - 1)] if vols else 0
+    for r in rows:
+        cp, op, pc = r["change_pct"], r["open"], r["prev_close"]
+        if cp is not None and cp > 0:
+            buckets["gainers"].append(r)
+        if cp is not None and cp < 0:
+            buckets["losers"].append(r)
+        if r["last"] and r["year_high"] and r["last"] >= r["year_high"] * 0.998:
+            buckets["high52"].append(r)
+        if r["last"] and r["year_low"] and r["last"] <= r["year_low"] * 1.002:
+            buckets["low52"].append(r)
+        if op and r["day_high"] and abs(op - r["day_high"]) < 1e-9:
+            buckets["open_high"].append(r)
+        if op and r["day_low"] and abs(op - r["day_low"]) < 1e-9:
+            buckets["open_low"].append(r)
+        if op and pc and op > pc * 1.004:
+            buckets["gap_up"].append(r)
+        if op and pc and op < pc * 0.996:
+            buckets["gap_down"].append(r)
+        if r["volume"] and vol_cut and r["volume"] >= vol_cut:
+            buckets["volume"].append(r)
+    for k in buckets:
+        buckets[k].sort(key=lambda r: -(r["change_pct"] or 0) if k in ("gainers", "volume") else (r["change_pct"] or 0))
+    return buckets

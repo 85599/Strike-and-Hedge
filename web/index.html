@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Options &amp; Futures Copilot Pro</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">
+<title>Strike &amp; Hedge - Supercharge Your Stock Trading</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header>
-  <div class="brand">Options<span>&amp;Futures</span> <small>Copilot Pro</small></div>
+  <div class="brand"><span class="brand-icon">S</span>Strike <span class="amp">&amp;</span> Hedge<small>Supercharge Your Stock Trading</small></div>
   <div class="search">
     <input id="q" type="search" list="sug" autocomplete="off" placeholder="Nifty, BankNifty, Sensex or a stock (RELIANCE) + Enter" aria-label="Search underlying">
     <datalist id="sug"></datalist>
@@ -18,22 +18,48 @@
 </header>
 <div class="strip" id="strip" aria-label="Index and macro rates"></div>
 <main>
-  <aside class="pn wl"><h2>Scanner <button class="btn ghost sm" id="scan-reload" type="button">Refresh</button></h2><div id="scan"></div>
-    <p class="hint">Rule-based bias for each underlying, refreshed every 30 s. Search a stock and press Enter to add it.</p></aside>
+  <aside class="pn wl">
+    <h2>Scanner <button class="btn ghost sm" id="scan-reload" type="button">Refresh</button></h2>
+    <div class="scan-filters" id="scan-filters">
+      <button class="sf active" data-filter="all">All</button>
+      <button class="sf" data-filter="gainers">Gainers</button>
+      <button class="sf" data-filter="losers">Losers</button>
+      <button class="sf" data-filter="bullish">Bullish</button>
+      <button class="sf" data-filter="bearish">Bearish</button>
+    </div>
+    <div id="scan"></div>
+    <p class="hint">Rule-based bias for each underlying, refreshed every 30 s. Search a stock and press Enter to add it.</p>
+  </aside>
   <div class="col">
     <nav class="tabs" role="tablist">
       <button role="tab" data-tab="signals" aria-selected="true">Signals</button>
-      <button role="tab" data-tab="chain" aria-selected="false">Option chain</button>
-      <button role="tab" data-tab="desk" aria-selected="false">AI desk</button>
+      <button role="tab" data-tab="chain" aria-selected="false">Option Chain</button>
+      <button role="tab" data-tab="market" aria-selected="false">Market</button>
+      <button role="tab" data-tab="desk" aria-selected="false">AI Desk</button>
     </nav>
     <section id="p-signals" class="col"></section>
     <section id="p-chain" class="col" hidden></section>
+    <section id="p-market" class="col" hidden></section>
     <section id="p-desk" class="col" hidden></section>
   </div>
   <aside class="right col">
-    <section class="pn"><h2>Recent AI runs</h2><div id="runs"></div></section>
-    <section class="pn"><h2>Decision log</h2><div id="dlog"></div></section>
-    <section class="pn"><h2>Data provenance</h2><div class="tw"><table><thead><tr><th>Item</th><th>Source</th><th>Status</th></tr></thead><tbody id="prov"></tbody></table></div></section>
+    <section class="pn fut-activity">
+      <h2>Futures Activity</h2>
+      <div class="fut-tabs">
+        <button class="ft active" data-ft="long">Long Build-up</button>
+        <button class="ft" data-ft="short">Short Build-up</button>
+        <button class="ft" data-ft="covering">Short Covering</button>
+        <button class="ft" data-ft="unwinding">Long Unwinding</button>
+      </div>
+      <div id="fut-data" class="fut-data"></div>
+    </section>
+    <section class="pn adv-dec">
+      <h2>Advance / Decline</h2>
+      <div id="adv-dec-data"></div>
+    </section>
+    <section class="pn"><h2>Recent AI Runs</h2><div id="runs"></div></section>
+    <section class="pn"><h2>Decision Log</h2><div id="dlog"></div></section>
+    <section class="pn"><h2>Data Provenance</h2><div class="tw"><table><thead><tr><th>Item</th><th>Source</th><th>Status</th></tr></thead><tbody id="prov"></tbody></table></div></section>
   </aside>
 </main>
 <p class="disc">Educational research tool. Not investment advice and not issued by a SEBI-registered research analyst. Entry, stop-loss and target levels are generated from rules and LLM text and can be wrong; options can expire worthless and futures can gap through stops. Never trade more than you can afford to lose. Data comes from unofficial NSE/BSE/Yahoo endpoints; use a licensed feed for any public product.</p>

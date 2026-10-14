@@ -173,7 +173,27 @@ def instant(symbol, expiry=None):
     info = und_meta(symbol)
     symbol = info["symbol"]
     ysym = mk.resolve_symbol(symbol, info.get("exchange"))
-    chain = ch.load(symbol, expiry)
+    chain = None
+    try:
+        chain = ch.load(symbol, expiry)
+    except Exception:  # noqa: BLE001
+        pass
+    if chain is None:
+        quote = None
+        try:
+            quote = mk.get_quote(symbol, info.get("exchange") or "NSE")
+        except Exception:  # noqa: BLE001
+            pass
+        spot = (quote or {}).get("price")
+        change_pct = (quote or {}).get("change_pct")
+        return {"symbol": symbol, "kind": info["kind"], "exchange": info.get("exchange"),
+                "chain": {"spot": spot, "underlying": symbol, "source": "fallback", "rows": [], "expiries": []},
+                "futures": None, "vix": mk.india_vix(), "tech": None,
+                "signal": {"bias": "AVOID", "confidence": 0, "metrics": {"spot": spot}, "setups": [],
+                           "error": "Option chain unavailable from exchange",
+                           "reasons": ["Option chain unavailable from exchange"], "warnings": ["Chain data unavailable; showing quote only."],
+                           "disclaimer": "Educational research only."},
+                "_quote_fallback": {"price": spot, "change_pct": change_pct}}
     fut = None
     try:
         fut = ch.load_futures(symbol)

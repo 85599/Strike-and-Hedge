@@ -6,7 +6,7 @@ import pathlib
 def _header(ticker, st, s):
     L = [f"# F&O Analysis Report: {ticker}", "", f"- Analysis date: {st['trade_date']}",
          f"- Generated: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-         f"- Options & Futures Copilot Pro: {s['llm_provider']}, deep {s['deep_think_llm']}, quick {s['quick_think_llm']}",
+         f"- Strike & Hedge: {s['llm_provider']}, deep {s['deep_think_llm']}, quick {s['quick_think_llm']}",
          f"- Analysts: {', '.join(s['analysts'])}; research debate rounds {s['max_debate_rounds']}, risk debate rounds {s['max_risk_discuss_rounds']}"]
     if s.get("data_sources"):
         L.append("- Data: " + "; ".join(s["data_sources"]))

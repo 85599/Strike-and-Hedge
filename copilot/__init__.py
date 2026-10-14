@@ -1,1 +1,1 @@
-# Options & Futures Copilot Pro
+# Strike & Hedge — Supercharge Your Stock Trading

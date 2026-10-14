@@ -12,6 +12,8 @@ INDEX_FNO = {
     },
     "FINNIFTY": {
         "kind": "index", "exchange": "NSE", "yahoo": "^CNXFINANCE", "nse_name": "NIFTY FINANCIAL SERVICES",
+        # Yahoo delisted ^CNXFINANCE, so daily history comes from NSE's index site instead.
+        "nifty_index": "NIFTY FIN SERVICE",
         "oc": "indices", "lot": 25, "step": 50,
     },
     "MIDCPNIFTY": {
@@ -24,7 +26,8 @@ INDEX_FNO = {
     },
     "BANKEX": {
         "kind": "index", "exchange": "BSE", "yahoo": "^BSEBANK", "nse_name": None,
-        "oc": "bse", "lot": 15, "step": 100, "bse_scrip": 12,
+        # No bse_scrip: BSE discontinued Bankex index options, so there is no chain to load.
+        "oc": "bse", "lot": 15, "step": 100,
     },
 }
 
@@ -49,6 +52,51 @@ ALIASES = {
     "BSE SENSEX": "SENSEX", "S&P BSE SENSEX": "SENSEX",
     "BSE BANKEX": "BANKEX",
 }
+
+# Approximate index members (Yahoo tickers without .NS) for the Market Overview
+# screener and breadth panels. Reviewed lists, not exchange-official weights.
+YAHOO_INDEX_MEMBERS = {
+    "NIFTY 50": [
+        "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "SBIN", "BHARTIARTL", "ITC",
+        "LT", "HINDUNILVR", "BAJFINANCE", "AXISBANK", "KOTAKBANK", "ASIANPAINT", "MARUTI",
+        "SUNPHARMA", "TITAN", "ULTRACEMCO", "NESTLEIND", "WIPRO", "HCLTECH", "NTPC",
+        "POWERGRID", "ONGC", "COALINDIA", "M&M", "TATAMOTORS", "TATASTEEL", "JSWSTEEL",
+        "ADANIPORTS", "ADANIENT", "BAJAJFINSV", "GRASIM", "TECHM", "BRITANNIA",
+        "APOLLOHOSP", "EICHERMOT", "DRREDDY", "CIPLA", "DIVISLAB", "HEROMOTOCO",
+        "HINDALCO", "VEDL", "SBILIFE", "HDFCLIFE", "TATACONSUM", "INDUSINDBK",
+        "SHRIRAMFIN", "BPCL", "TRENT"],
+    "NIFTY BANK": [
+        "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "INDUSINDBK",
+        "BANDHANBNK", "FEDERALBNK", "IDFCFIRSTB", "PNB", "BANKBARODA", "AUBANK"],
+    "NIFTY IT": [
+        "TCS", "INFY", "HCLTECH", "WIPRO", "TECHM", "LTIM", "PERSISTENT", "COFORGE",
+        "MPHASIS", "OFSS"],
+    "NIFTY AUTO": [
+        "MARUTI", "TATAMOTORS", "M&M", "EICHERMOT", "HEROMOTOCO", "BAJAJ-AUTO",
+        "TVSMOTOR", "ASHOKLEY", "BOSCHLTD", "MOTHERSON", "BHARATFORG", "EXIDEIND",
+        "MRF", "BALKRISIND", "SONACOMS"],
+    "NIFTY PHARMA": [
+        "SUNPHARMA", "DRREDDY", "CIPLA", "DIVISLAB", "AUROPHARMA", "LUPIN",
+        "TORNTPHARM", "ALKEM", "IPCALAB", "GLENMARK"],
+    "NIFTY FMCG": [
+        "HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "DABUR", "GODREJCP", "MARICO",
+        "COLPAL", "TATACONSUM", "EMAMILTD"],
+    "NIFTY METAL": [
+        "TATASTEEL", "JSWSTEEL", "HINDALCO", "VEDL", "COALINDIA", "JINDALSTEL",
+        "SAIL", "NMDC", "NATIONALUM", "APLAPOLLO", "RATNAMANI", "WELCORP", "MOIL",
+        "GRAPHITE", "HINDZINC"],
+    "NIFTY FIN SERVICE": [
+        "BAJFINANCE", "BAJAJFINSV", "SHRIRAMFIN", "CHOLAFIN", "MUTHOOTFIN", "SBICARD",
+        "MANAPPURAM", "LTF", "PFC", "RECLTD"],
+}
+
+# Liquid F&O names polled for the Futures Activity (buildup) panel.
+FUT_ACTIVE_POOL = [
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "RELIANCE", "HDFCBANK", "ICICIBANK",
+    "SBIN", "INFY", "TCS", "ITC", "LT", "AXISBANK", "BAJFINANCE", "TATAMOTORS",
+    "TATASTEEL", "JSWSTEEL", "ADANIPORTS", "ADANIENT", "M&M", "MARUTI", "SUNPHARMA",
+    "HCLTECH", "TECHM", "VEDL", "HINDALCO", "BPCL", "ONGC", "NTPC", "TRENT",
+]
 
 
 def canonical(sym: str) -> str:

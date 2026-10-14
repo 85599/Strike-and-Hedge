@@ -62,7 +62,10 @@ def load(symbol, expiry=None):
     info = und_meta(symbol)
     sym = info["symbol"]
     if info["oc"] == "bse":
-        chain = bse_mod.option_chain(sym, scrip_cd=info.get("bse_scrip") or 1, expiry=expiry)
+        scrip_cd = info.get("bse_scrip")
+        if not scrip_cd:
+            raise LookupError(f"BSE lists no option contracts for {sym}")
+        chain = bse_mod.option_chain(sym, scrip_cd=scrip_cd, expiry=expiry)
     else:
         chain = nse_mod.option_chain(sym, kind=info["oc"], expiry=expiry)
     if not chain.get("lot_size"):

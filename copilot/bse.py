@@ -1,12 +1,42 @@
-"""BSE Sensex / Bankex option chain (unofficial). Best-effort; NSE indices remain the primary feed."""
+"""BSE Sensex option chain + index quotes (unofficial, personal use).
+
+BSE's JSON API is Akamai-guarded the same way NSE's is, so this borrows the Chrome TLS
+fingerprint from copilot.nse. Endpoints were recovered from BSE's 2026 Angular bundles:
+
+  /BseIndiaAPI/api/IndexMasterNew_ng/w     → live quote for every BSE index
+  /BseIndiaAPI/api/GetMaxdateForSensex/w   → latest date BSE has data for
+  /BseIndiaAPI/api/DerivOptionChain/w      → option chain for one expiry
+
+Two quirks the exchange leaves for us: the chain only answers when Expiry is spelled
+"%d %b %Y" (a dash-separated date silently returns an empty table), and BSE publishes no
+expiry list at all — Sensex weeklies trade on Thursdays, so expiries are discovered by
+asking the chain which Thursdays are live. Unknown endpoints return HTTP 200 with an
+HTML "page moved" body, hence the JSON guard in BSEClient.get.
+"""
+import datetime as dt
+import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from zoneinfo import ZoneInfo
 
-import requests
+from .nse import IST, UA, _live_expiries, _num
 
-from .nse import UA, _num
+try:
+    from curl_cffi import requests as _req
+    _IMPERSONATE = "chrome"
+except ImportError:
+    import requests as _req
+    _IMPERSONATE = None
 
 BASE = "https://api.bseindia.com"
+API = "/BseIndiaAPI/api"
+
+# BSE's own numeric code for the Sensex index-option contract series.
+SENSEX_SCRIP = 1
+INDEX_CODES = {"SENSEX": "BSE SENSEX", "BANKEX": "BSE BANKEX"}
+PROBE_WEEKS = 6  # Thursdays to test for live contracts
+EXPIRY_TTL = 1800
 
 
 class BSEClient:
@@ -14,13 +44,18 @@ class BSEClient:
         self.s, self.t, self.lock = None, 0.0, threading.Lock()
 
     def _fresh(self):
-        s = requests.Session()
+        s = _req.Session(impersonate=_IMPERSONATE) if _IMPERSONATE else _req.Session()
         s.headers.update({
-            "User-Agent": UA, "Accept": "application/json, text/plain, */*",
+            "User-Agent": UA,
+            "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.bseindia.com/", "Origin": "https://www.bseindia.com",
+            "Referer": "https://www.bseindia.com/derivatives/OptionChain",
+            "Origin": "https://www.bseindia.com",
         })
-        s.get("https://www.bseindia.com/", timeout=10)
+        try:
+            s.get("https://www.bseindia.com/", timeout=12)
+        except Exception:  # noqa: BLE001
+            pass
         return s
 
     def get(self, path, params=None):
@@ -28,92 +63,134 @@ class BSEClient:
             if self.s is None or time.time() - self.t > 240:
                 self.s, self.t = self._fresh(), time.time()
             s = self.s
-        r = s.get(BASE + path, params=params, timeout=12)
-        if r.status_code in (401, 403):
+        r = s.get(BASE + path, params=params, timeout=20)
+        body = (r.text or "").strip()
+        if r.status_code in (401, 403) or body[:1] == "<":
+            # a moved/unknown endpoint answers 200 + HTML; retry once with fresh cookies
             with self.lock:
                 self.s, self.t = self._fresh(), time.time()
                 s = self.s
-            r = s.get(BASE + path, params=params, timeout=12)
+            r = s.get(BASE + path, params=params, timeout=20)
+            body = (r.text or "").strip()
         r.raise_for_status()
-        return r.json()
+        if body[:1] not in ("{", "["):
+            raise LookupError(f"BSE has no endpoint at {path}")
+        return json.loads(body)
 
 
 BSE = BSEClient()
 
 
-def expiries(scrip_cd=1):
-    j = BSE.get("/BseIndiaAPI/api/ddlExpiry_new/w", {"DerivType": 2, "scrip_cd": scrip_cd})
-    # payload shapes vary; collect strings that look like dates
-    out = []
-    blob = j if isinstance(j, list) else (j.get("Table") or j.get("data") or j.get("Expiry") or [])
-    if isinstance(j, dict) and not blob:
-        blob = j
-    if isinstance(blob, dict):
-        blob = blob.get("Table") or blob.get("data") or list(blob.values())
-    for it in blob or []:
-        if isinstance(it, str):
-            out.append(it)
-        elif isinstance(it, dict):
-            out.append(it.get("Expiry") or it.get("expiry") or it.get("ExpiryDate") or it.get("Value") or it.get("Text"))
-    return [x for x in out if x]
+def _api_date(d):
+    return d.strftime("%d %b %Y")
 
 
-def _leg(row, prefix):
-    return {
-        "oi": _num(row.get(prefix + "OI") or row.get(prefix + "OpenInterest") or row.get("CallOI" if prefix == "CE" else "PutOI")),
-        "oi_chg": _num(row.get(prefix + "OIChange") or row.get(prefix + "ChangeInOI")),
-        "volume": _num(row.get(prefix + "Volume") or row.get(prefix + "Vol")),
-        "iv": _num(row.get(prefix + "IV") or row.get(prefix + "ImpliedVolatility")),
-        "ltp": _num(row.get(prefix + "LTP") or row.get(prefix + "LastPrice") or row.get(prefix + "Last")),
-        "change": _num(row.get(prefix + "Change")),
-        "bid": _num(row.get(prefix + "Bid") or row.get(prefix + "BuyPrice")),
-        "ask": _num(row.get(prefix + "Ask") or row.get(prefix + "SellPrice")),
-    }
+def _display_date(d):
+    return d.strftime("%d-%b-%Y")
 
 
-def option_chain(symbol="SENSEX", scrip_cd=1, expiry=None):
+def _upcoming_thursdays(count, now=None):
+    now = now or dt.datetime.now(IST)
+    day, out = now.date(), []
+    while len(out) < count:
+        day += dt.timedelta(days=1)
+        if day.weekday() == 3:  # BSE moved index expiry from Tuesday to Thursday
+            out.append(day)
+    return out
+
+
+def _rows_for(scrip_cd, when):
+    j = BSE.get(API + "/DerivOptionChain/w",
+                {"scrip_cd": scrip_cd, "ProductType": "IO", "Expiry": _api_date(when)})
+    return j.get("Table") or [], (j.get("ASON") or [{}])[0].get("DT_TM")
+
+
+_expiries_cache, _expiries_lock = {}, threading.Lock()
+
+
+def expiries(scrip_cd=SENSEX_SCRIP, now=None):
+    """Live expiry dates as "DD-Mon-YYYY" (the shape the rest of the app uses)."""
+    now = now or dt.datetime.now(IST)
+    key = (scrip_cd, now.strftime("%Y-%m-%d"))
+    with _expiries_lock:
+        hit = _expiries_cache.get(key)
+        if hit and time.time() - hit[0] < EXPIRY_TTL:
+            return list(hit[1])
+    found = []
+    candidates = _upcoming_thursdays(PROBE_WEEKS, now)
+    with ThreadPoolExecutor(6) as pool:
+        for when, rows in pool.map(lambda d: (d, _rows_for(scrip_cd, d)[0]), candidates):
+            if rows:
+                found.append(_display_date(when))
+    out = _live_expiries(sorted(found, key=lambda s: dt.datetime.strptime(s, "%d-%b-%Y")))
+    with _expiries_lock:
+        _expiries_cache[key] = (time.time(), out)
+    return list(out)
+
+
+_CE = {"oi": "C_Open_Interest", "oi_chg": "C_Absolute_Change_OI", "volume": "C_Vol_Traded",
+       "ltp": "C_Last_Trd_Price", "change": "C_NetChange", "bid": "C_BidPrice", "ask": "C_OfferPrice",
+       "bid_qty": "C_BIdQty", "ask_qty": "C_OfferQty", "identifier": "C_Series_Code"}
+# BSE leaves the put columns unprefixed and spells its one contract-code field lowercase.
+_PE = {"oi": "Open_Interest", "oi_chg": "Absolute_Change_OI", "volume": "Vol_Traded",
+       "ltp": "Last_Trd_Price", "change": "NetChange", "bid": "BidPrice", "ask": "OfferPrice",
+       "bid_qty": "BIdQty", "ask_qty": "OfferQty", "identifier": "p_Series_Code"}
+
+
+def _leg(row, fields):
+    leg = {k: (row.get(f) if k == "identifier" else _num(row.get(f))) for k, f in fields.items()}
+    leg["iv"] = None  # BSE's chain carries no IV; chain._attach_greeks solves it from the premium
+    return leg
+
+
+def option_chain(symbol="SENSEX", scrip_cd=SENSEX_SCRIP, expiry=None):
     exps = expiries(scrip_cd)
-    chosen = expiry if expiry in exps else (exps[0] if exps else expiry)
-    params = {"ProductType": "IO", "Expiry": chosen, "scrip_cd": scrip_cd}
-    try:
-        raw = BSE.get("/BseIndiaAPI/api/GetOptionChain/w", params)
-    except Exception:
-        raw = BSE.get("/BseIndiaAPI/api/GetOptionChainLive/w", {
-            "ProductType": "IO", "ExpiryDate": chosen, "UnderlyingScripCode": scrip_cd,
-        })
-    table = raw.get("Table") or raw.get("data") or raw.get("OptionChain") or []
-    if isinstance(raw, list):
-        table = raw
-    rows, spot, lot = [], None, None
+    chosen = expiry if expiry in exps else (exps[0] if exps else None)
+    if not chosen:
+        raise LookupError(f"BSE lists no live {symbol} option expiries")
+    when = dt.datetime.strptime(chosen, "%d-%b-%Y").date()
+    table, stamped = _rows_for(scrip_cd, when)
+    rows, spot = [], None
     for row in table:
-        if not isinstance(row, dict):
-            continue
-        k = _num(row.get("StrikePrice") or row.get("Strike") or row.get("strikePrice"))
+        k = _num(row.get("Strike_Price"))
         if k is None:
             continue
-        spot = spot or _num(row.get("UnderlyingValue") or row.get("Spot") or row.get("LTP"))
-        lot = lot or _num(row.get("MarketLot") or row.get("LotSize"))
-        # some payloads nest CE/PE; others flatten Call*/Put*
-        if row.get("CE") or row.get("PE"):
-            from .nse import _leg_from_nse
-            rows.append({"strike": k, "ce": _leg_from_nse(row.get("CE")), "pe": _leg_from_nse(row.get("PE"))})
-        else:
-            rows.append({"strike": k, "ce": _leg(row, "CE") if any(x in row for x in ("CELTP", "CE_LTP", "CallLTP")) else {
-                "oi": _num(row.get("CallOI")), "oi_chg": _num(row.get("CallOIChange")),
-                "volume": _num(row.get("CallVolume")), "iv": _num(row.get("CallIV")),
-                "ltp": _num(row.get("CallLTP")), "change": _num(row.get("CallChange")),
-                "bid": _num(row.get("CallBid")), "ask": _num(row.get("CallAsk")),
-            }, "pe": {
-                "oi": _num(row.get("PutOI")), "oi_chg": _num(row.get("PutOIChange")),
-                "volume": _num(row.get("PutVolume")), "iv": _num(row.get("PutIV")),
-                "ltp": _num(row.get("PutLTP")), "change": _num(row.get("PutChange")),
-                "bid": _num(row.get("PutBid")), "ask": _num(row.get("PutAsk")),
-            }})
-    rows.sort(key=lambda r: r["strike"] or 0)
+        spot = spot or _num(row.get("UlaValue"))
+        rows.append({"strike": k, "ce": _leg(row, _CE), "pe": _leg(row, _PE)})
     if not rows:
         raise LookupError(f"BSE returned no option-chain rows for {symbol}")
+    rows.sort(key=lambda r: r["strike"])
     return {
         "underlying": symbol, "spot": spot, "expiry": chosen, "expiries": exps,
-        "rows": rows, "lot_size": int(lot) if lot else None, "source": "BSE.com",
-        "as_of": None, "kind": "bse",
+        "rows": rows, "lot_size": None, "source": "BSE.com",
+        "as_of": stamped, "kind": "bse",
     }
+
+
+def indices():
+    """Live quote for every BSE index, keyed by display name. BSE's payload carries no
+    day OHLC here, so high/low/open stay None — the chain's UlaValue covers the spot."""
+    j = BSE.get(API + "/IndexMasterNew_ng/w", {"flag": 1})
+    out = {}
+    for row in j.get("table") or []:
+        price = _num(row.get("LTP"))
+        if price is None:
+            continue
+        out[str(row.get("INDEXNAME", "")).upper()] = {
+            "price": price, "prev_close": _num(row.get("Prev_Close")),
+            "change": _num(row.get("CHANGE")), "change_pct": _num(row.get("PERCENTCHG")),
+            "high": None, "low": None, "open": None, "code": row.get("code"),
+        }
+    return out
+
+
+def quote(symbol):
+    name = INDEX_CODES.get(str(symbol).upper())
+    if not name:
+        raise LookupError(f"{symbol} is not a BSE index")
+    row = indices().get(name)
+    if not row or not row.get("price"):
+        raise LookupError(f"BSE has no live quote for {symbol}")
+    return {"price": row["price"], "prev_close": row["prev_close"], "open": None,
+            "high": None, "low": None, "volume": None,
+            "as_of": dt.datetime.now(IST), "name": name, "currency": "INR"}
