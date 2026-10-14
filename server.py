@@ -122,8 +122,8 @@ def signal(sym: str, expiry: str | None = None, rows: int = Query(12, ge=3, le=4
     d = _load_or_http(sym, expiry)
     ch = d["chain"]
     return {"symbol": d["symbol"], "kind": d["kind"], "exchange": d["exchange"], "signal": d["signal"],
-            "futures": d["futures"], "vix": {k: d["vix"].get(k) for k in ("price", "change_pct", "source", "as_of_label", "stale")},
-            "tech": d["tech"],
+            "futures": d["futures"], "tape": d.get("tape") or {}, "tech": d["tech"],
+            "vix": {k: d["vix"].get(k) for k in ("price", "change_pct", "source", "as_of_label", "stale")},
             "chain": {"underlying": ch.get("underlying"), "spot": ch.get("spot"), "expiry": ch.get("expiry"),
                       "expiries": ch.get("expiries"), "lot_size": ch.get("lot_size"), "source": ch.get("source"),
                       "as_of": ch.get("as_of"), "dte_days": ch.get("dte_days"), "rows": _trim(ch, rows)},

@@ -23,15 +23,36 @@ def _rr(entry, stop, target, side):
     return round(reward / risk, 2) if reward else None
 
 
-def score_bias(metrics: dict, fut: dict | None, vix: dict | None, tech: dict | None) -> dict:
+def score_bias(metrics: dict, fut: dict | None, vix: dict | None, tech: dict | None,
+               tape: dict | None = None) -> dict:
     s = 0
     reasons = []
+    flow, flow_reasons = 0, []
     pcr = _n(metrics.get("pcr_oi"))
     spot = _n(metrics.get("spot")) or 0
     mp = _n(metrics.get("max_pain"))
     put_wall = _n(metrics.get("put_wall"))
     call_wall = _n(metrics.get("call_wall"))
     pe_w, ce_w = _n(metrics.get("pe_writing")) or 0, _n(metrics.get("ce_writing")) or 0
+
+    # The tape itself, measured in ATRs of the underlying. OI structure is sticky: it says where
+    # shorts are positioned, not what price is doing today, so without this term a sharp session
+    # move still scores ~0 and prints RANGE. 0.3% means something different on NIFTY than on a
+    # 3%-vol name, hence ATR units rather than raw percent.
+    chg = _n((tape or {}).get("change_pct"))
+    atr = _n((tech or {}).get("atr"))
+    if chg is not None:
+        day_pct = abs(atr) / spot * 100 if atr and spot else None
+        if day_pct:
+            units = abs(chg) / day_pct
+            mag = next((m for cut, m in ((0.6, 3), (0.3, 2), (0.15, 1)) if units >= cut), 0)
+        else:
+            units, mag = None, next((m for cut, m in ((0.75, 3), (0.35, 2), (0.15, 1)) if abs(chg) >= cut), 0)
+        if mag:
+            s += mag if chg > 0 else -mag
+            move = f"{chg:+.2f}%"
+            tail = f" — {units:.2f} ATR of a {day_pct:.2f}% daily range" if units is not None else ""
+            reasons.append(f"Underlying {move} today{tail}")
 
     if pcr is not None:
         if pcr >= 1.25:
@@ -68,11 +89,32 @@ def score_bias(metrics: dict, fut: dict | None, vix: dict | None, tech: dict | N
             reasons.append(f"Spot is pressing call OI wall {call_wall:.0f} (resistance)")
 
     if pe_w > ce_w * 1.25 and pe_w > 0:
-        s += 2
-        reasons.append("Net put writing near ATM (shorts defending support)")
+        flow += 2
+        flow_reasons.append("Net put writing near ATM (shorts defending support)")
     elif ce_w > pe_w * 1.25 and ce_w > 0:
-        s -= 2
-        reasons.append("Net call writing near ATM (shorts defending resistance)")
+        flow -= 2
+        flow_reasons.append("Net call writing near ATM (shorts defending resistance)")
+
+    # Longs on the same strikes. Put *buying* is the fingerprint of a sell-off — a premium that
+    # rises while OI rises — but the old score only looked at writing, so a real down day moved it
+    # not at all. Weaker evidence than writing (no margin locked up), so it counts half as much.
+    ce_b, pe_b = _n(metrics.get("ce_buying")) or 0, _n(metrics.get("pe_buying")) or 0
+    ce_u, pe_u = _n(metrics.get("ce_unwinding")) or 0, _n(metrics.get("pe_unwinding")) or 0
+    ce_c, pe_c = _n(metrics.get("ce_covering")) or 0, _n(metrics.get("pe_covering")) or 0
+    bull_longs, bear_longs = ce_b + pe_u + pe_c, pe_b + ce_u + ce_c
+    if bull_longs > bear_longs * 1.25 and bull_longs > 0:
+        flow += 1
+        flow_reasons.append("Net call buying / put unwinding near ATM")
+    elif bear_longs > bull_longs * 1.25 and bear_longs > 0:
+        flow -= 1
+        flow_reasons.append("Net put buying / call unwinding near ATM")
+
+    # One idea, not three: writing and buying on the same move usually say the same thing, so the
+    # block is capped instead of stacking to -6 on an ordinary directional day.
+    capped = max(-3, min(3, flow))
+    if capped:
+        s += capped
+        reasons.extend(flow_reasons)
 
     if fut:
         basis = _n(fut.get("basis_pct"))
@@ -112,6 +154,16 @@ def score_bias(metrics: dict, fut: dict | None, vix: dict | None, tech: dict | N
             reasons.append("MACD histogram " + ("positive" if macdh > 0 else "negative"))
 
     vix_px = _n((vix or {}).get("price"))
+    vix_chg = _n((vix or {}).get("change_pct"))
+    # A VIX bid alongside a falling underlying is the same direction being paid for twice, so it
+    # confirms rather than doubles the tape term.
+    if vix_chg is not None and chg is not None:
+        if vix_chg >= 3 and chg < -0.1:
+            s -= 1
+            reasons.append(f"India VIX {vix_chg:+.1f}% while the underlying sells off (risk-off confirmation)")
+        elif vix_chg <= -3 and chg > 0.1:
+            s += 1
+            reasons.append(f"India VIX {vix_chg:+.1f}% on an up session (volatility unwinding)")
     avoid = False
     if vix_px and vix_px >= 20:
         avoid = abs(s) < 3
@@ -344,11 +396,11 @@ def build_setups(chain: dict, metrics: dict, scored: dict, fut: dict | None = No
 
 
 def instant_signal(chain: dict, fut: dict | None = None, vix: dict | None = None, tech: dict | None = None,
-                   market: dict | None = None) -> dict:
+                   market: dict | None = None, tape: dict | None = None) -> dict:
     metrics = summarise_chain(chain)
     if metrics.get("error"):
         return {"bias": "AVOID", "confidence": 0, "metrics": metrics, "setups": [], "error": metrics["error"]}
-    scored = score_bias(metrics, fut, vix, tech)
+    scored = score_bias(metrics, fut, vix, tech, tape)
     setups = build_setups(chain, metrics, scored, fut, tech)
     primary = next((s for s in setups if s.get("kind") != "AVOID"), setups[0] if setups else None)
     warnings = []

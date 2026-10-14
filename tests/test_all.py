@@ -104,6 +104,60 @@ def test_high_vix_with_mixed_signals_is_avoid():
     assert s["bias"] == "AVOID" and s["primary"]["kind"] == "AVOID" and s["primary"]["entry"] is None
 
 
+# ------------------------------------------------------------------ tape (price momentum)
+def test_a_selloff_is_not_range_even_with_two_sided_open_interest():
+    """The bug this whole block exists for: every index printed RANGE on a sharp down session,
+    because the score read only OI structure and yesterday's daily technicals. Today's own move
+    was not an input at all, and RANGE then hands the user a premium-selling spread."""
+    m = analytics.summarise_chain(make_chain(lean="range"))
+    tech = {"rsi": 50, "macdh": 0.0, "atr": 150}
+    base = signals.score_bias(m, None, VIX_OK, tech)
+    down = signals.score_bias(m, None, VIX_OK, tech, {"change_pct": -1.0})
+    assert base["bias"] == "RANGE"
+    assert down["bias"] == "BEARISH" and down["score"] == base["score"] - 3
+    assert any("Underlying -1.00%" in r and "ATR" in r for r in down["reasons"])
+    s = signals.instant_signal(make_chain(lean="range"), None, VIX_OK, tech, {"state": "open"}, {"change_pct": -1.0})
+    kinds = {x["kind"] for x in s["setups"]}
+    assert kinds & {"SELL_CE_SPREAD", "SELL_PE_SPREAD"} == set(), "must not sell premium into a selloff"
+    assert s["primary"]["kind"] == "BUY_PE"
+
+
+def test_the_same_percent_move_is_scaled_by_realised_vol():
+    """0.3% is half an ATR-day on NIFTY and a rounding error on a 2.4%-vol name."""
+    m = analytics.summarise_chain(make_chain(lean="range"))
+    base = signals.score_bias(m, None, VIX_OK, {"rsi": 50, "macdh": 0.0, "atr": 150})["score"]
+    calm = signals.score_bias(m, None, VIX_OK, {"rsi": 50, "macdh": 0.0, "atr": 150}, {"change_pct": -0.3})
+    volatile = signals.score_bias(m, None, VIX_OK, {"rsi": 50, "macdh": 0.0, "atr": 600}, {"change_pct": -0.3})
+    assert calm["score"] == base - 2
+    assert volatile["score"] == base
+
+
+def test_a_session_that_is_flat_for_this_underlying_adds_no_direction():
+    m = analytics.summarise_chain(make_chain(lean="range"))
+    tech = {"rsi": 50, "macdh": 0.0, "atr": 150}
+    base = signals.score_bias(m, None, VIX_OK, tech)
+    still = signals.score_bias(m, None, VIX_OK, tech, {"change_pct": -0.05})
+    assert still["score"] == base["score"] and not any("Underlying" in r for r in still["reasons"])
+
+
+def test_put_buying_is_counted_and_does_not_stack_on_call_writing():
+    """Put OI up while the put premium rises is the fingerprint of a sell-off. Only *writing* was
+    read before, so it scored zero. Both legs usually describe one move, so the block is capped."""
+    m = {"spot": 25000, "pcr_oi": 1.0, "max_pain": 25000, "put_wall": 24500, "call_wall": 25500,
+         "ce_writing": 100000, "pe_writing": 0, "pe_buying": 90000}
+    out = signals.score_bias(m, None, {"price": 13.5}, None)
+    assert out["score"] == -3 and not out["score"] < -3
+    assert any("call writing" in r for r in out["reasons"]) and any("put buying" in r for r in out["reasons"])
+
+
+def test_vix_bid_alongside_the_selloff_confirms_without_doubling():
+    m = {"spot": 25000, "pcr_oi": 1.0, "max_pain": 25000, "put_wall": 24500, "call_wall": 25500}
+    quiet = signals.score_bias(m, None, {"price": 13.5}, None, {"change_pct": -0.2})
+    risk_off = signals.score_bias(m, None, {"price": 13.5, "change_pct": 6.0}, None, {"change_pct": -0.2})
+    assert risk_off["score"] == quiet["score"] - 1
+    assert any("risk-off confirmation" in r for r in risk_off["reasons"])
+
+
 def test_expiry_day_warning():
     ch = make_chain(lean="bull", days=0)
     ch["dte_days"] = 0.3

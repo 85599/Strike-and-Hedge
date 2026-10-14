@@ -55,7 +55,9 @@ def collect(symbol, exchange, trade_date, cfg, analysts, expiry=None):
     except Exception as e:  # noqa: BLE001
         provenance.append({"item": "history", "source": "Yahoo", "status": f"error: {e}"[:120]})
 
-    signal = instant_signal(chain, fut, vix, tech, mk.market_status()) if chain else {"bias": "AVOID", "setups": [], "error": "no chain"}
+    signal = (instant_signal(chain, fut, vix, tech, mk.market_status(),
+                             {"change_pct": (quote or {}).get("change_pct")})
+              if chain else {"bias": "AVOID", "setups": [], "error": "no chain"})
 
     news_pack = None
     if "news" in analysts:
@@ -200,12 +202,18 @@ def instant(symbol, expiry=None):
     except Exception:  # noqa: BLE001
         pass
     vix = mk.india_vix()
+    tape = {}
+    try:
+        q = mk.get_quote(symbol, info.get("exchange") or "NSE")
+        tape = {"change_pct": q.get("change_pct"), "price": q.get("price")}
+    except Exception:  # noqa: BLE001
+        pass
     tech = None
     try:
         df = mk.history(ysym, period="1y")
         tech = ind.latest(ind.compute_all(df))
     except Exception:  # noqa: BLE001
         pass
-    sig = instant_signal(chain, fut, vix, tech, mk.market_status())
+    sig = instant_signal(chain, fut, vix, tech, mk.market_status(), tape)
     return {"symbol": symbol, "kind": info["kind"], "exchange": info.get("exchange"), "chain": chain, "futures": fut,
-            "vix": vix, "tech": tech, "signal": sig}
+            "vix": vix, "tech": tech, "tape": tape, "signal": sig}

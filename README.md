@@ -14,7 +14,7 @@ debate → risk → portfolio manager) sits on top of the same numbers.
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
   <a href="https://github.com/85599/Strike-and-Hedge/actions/workflows/ci.yml"><img src="https://github.com/85599/Strike-and-Hedge/actions/workflows/ci.yml/badge.svg" alt="CI tests"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-brightgreen" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/tests-36%20offline-brightgreen" alt="36 offline tests">
+  <img src="https://img.shields.io/badge/tests-41%20offline-brightgreen" alt="41 offline tests">
   <img src="https://img.shields.io/badge/API%20key-not%20needed-informational" alt="No API key needed">
   <img src="https://img.shields.io/badge/build%20step-none-critical" alt="No build step">
   <a href="https://github.com/85599/Strike-and-Hedge/stargazers"><img src="https://img.shields.io/github/stars/85599/Strike-and-Hedge?style=social" alt="Stars"></a>
@@ -41,12 +41,13 @@ question — *"so what do I actually do?"* — and shows its working:
 
 ## What you get
 
-- **Signals tab — no key required.** PCR (OI and volume), max pain, call/put OI walls, ATM IV, expected move from
-  ATR and IV, OI buildup, futures basis and buildup, India VIX, RSI / MACD / Bollinger / EMA-SMA. Scored into a
+- **Signals tab — no key required.** The session's own move, measured in ATRs of *that* underlying, PCR (OI and
+  volume), max pain, call/put OI walls, ATM IV, expected move from ATR and IV, OI buildup on both sides of the trade
+  (writing *and* buying), India VIX level and its session change, RSI / MACD / Bollinger / EMA-SMA. Scored into a
   bias with plain-English reasons.
 - **Concrete plans, never naked selling.**
-  - Bullish → **BUY CE** (first strike beyond ATM) and **Futures long**
-  - Bearish → **BUY PE** and **Futures short**
+  - Bullish → **BUY CE** (first strike beyond ATM), plus a **futures long** where a futures quote resolves
+  - Bearish → **BUY PE**, plus a **futures short** where a futures quote resolves
   - Range → **defined-risk credit spreads** — sell near the OI wall, buy a hedge two strikes further out
   - Option stops and targets derive from ATR and OI walls on the *underlying*, converted to premium through delta,
     so they react to real price geometry instead of a fixed percentage.
@@ -78,7 +79,7 @@ Open <http://localhost:8000>. The Signals, Option Chain and Market tabs work wit
 for the AI desk.
 
 ```bash
-python -m pytest tests -q        # 36 offline tests: no network, no keys
+python -m pytest tests -q        # 41 offline tests: no network, no keys
 python tests/ui_harness.py       # the full UI on synthetic data → http://127.0.0.1:8765
 ```
 
@@ -115,6 +116,7 @@ briefly. As of October 2026:
 | FINNIFTY daily history | niftyindices.com | Yahoo delisted `^CNXFINANCE`; NSE's own chart API returns empty for every index |
 | FINNIFTY intraday chart | **none available** | the panel falls back to recent daily bars and labels that it did |
 | Quotes, India VIX, macro | NSE `allIndices`, Yahoo Finance | lot sizes in `copilot/universe.py` are fallbacks; the live lot wins when present |
+| Futures quotes | **NSE retired `quote-derivative`** | `quote-v2` and `last-price-v5` are 404 too, so index futures basis and futures OI are not scored; the buildup panel estimates from option ΔOI and says so |
 
 Both exchanges sit behind Akamai, so plain `requests` gets 403s: the clients use `curl_cffi` with a Chrome TLS
 fingerprint and warm cookies, and fall back to `requests` if it is unavailable. Endpoints change and rate-limits
@@ -138,7 +140,7 @@ copilot/
   agents.py graph.py the AI desk: analysts → debate → risk → portfolio manager
   jobs.py memory.py  background runs, report files, decision log
 web/                 dashboard (vanilla JS, no build step)
-tests/               36 offline tests + a synthetic-data UI harness
+tests/               41 offline tests + a synthetic-data UI harness
 docs/                demo video, GIF preview, screenshots
 ```
 
